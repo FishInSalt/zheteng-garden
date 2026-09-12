@@ -25,6 +25,7 @@ const decodeSegment = (value: string) => {
 };
 
 const navLabels: Record<string, string> = {
+  topics: "专题",
   posts: t.nav.posts,
   tags: t.nav.tags,
   about: t.nav.about,
@@ -57,7 +58,7 @@ if (breadcrumbList[0] === "tags" && !isNaN(Number(breadcrumbList[2]))) {
 }
 ---
 
-<nav class="app-layout mt-8 mb-1" aria-label="breadcrumb">
+<nav class="app-layout mt-8 mb-1" aria-label="面包屑导航">
   <ul
     class="flex flex-wrap items-center gap-x-1 font-light [&>li:not(:last-child)>a]:hover:opacity-100"
   >

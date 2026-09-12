@@ -1,0 +1,42 @@
+---
+import { getCollection } from "astro:content";
+import Layout from "@/layouts/Layout.astro";
+import Header from "@/components/Header.astro";
+import Footer from "@/components/Footer.astro";
+import Breadcrumb from "@/components/Breadcrumb.astro";
+import Main from "@/components/Main.astro";
+import { getSortedPosts } from "@/utils/getSortedPosts";
+import { getPostUrl } from "@/utils/getPostPaths";
+import config from "@/config";
+const posts = getSortedPosts(await getCollection("posts")).filter(p =>
+  p.data.tags.includes("博客搭建")
+);
+---
+
+<Layout
+  title={`专题 | ${config.site.title}`}
+  description="把零散的知识，整理成可以循序阅读的目录。"
+>
+  <Header /><Breadcrumb />
+  <Main pageTitle="专题" pageDesc="把零散的知识，整理成可以循序阅读的目录。">
+    <section class="topic-card">
+      <h2>个人博客搭建</h2>
+      <p>从框架与主题选择，到中文适配、内容管理、搜索和部署。</p>
+      <ol class="mt-5 list-decimal space-y-3 pl-5">
+        {
+          posts.map(post => (
+            <li>
+              <a
+                class="text-accent hover:underline"
+                href={getPostUrl(post.id, post.filePath)}
+              >
+                {post.data.title}
+              </a>
+            </li>
+          ))
+        }
+      </ol>
+      <p class="mt-5 text-sm">已整理 {posts.length} 篇文章</p>
+    </section>
+  </Main><Footer />
+</Layout>

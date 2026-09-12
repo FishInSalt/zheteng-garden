@@ -1,138 +1,65 @@
 ---
 import { getCollection } from "astro:content";
-import { getRelativeLocaleUrl } from "astro:i18n";
-import IconRss from "@/assets/icons/IconRss.svg";
-import IconArrowRight from "@/assets/icons/IconArrowRight.svg";
 import Layout from "@/layouts/Layout.astro";
 import Header from "@/components/Header.astro";
 import Footer from "@/components/Footer.astro";
-import Socials from "@/components/Socials.astro";
 import Card from "@/components/Card.astro";
-import LinkButton from "@/components/LinkButton.astro";
 import { getSortedPosts } from "@/utils/getSortedPosts";
-import { useTranslations } from "@/i18n";
 import config from "@/config";
-
-const { socials, posts: postsConfig } = config;
-
-const locale = Astro.currentLocale ?? config.site.lang;
-const t = useTranslations(locale);
-
-const posts = await getCollection("posts");
-const sortedPosts = getSortedPosts(posts);
-const featuredPosts = sortedPosts.filter(({ data }) => data.featured);
-const recentPosts = sortedPosts.filter(({ data }) => !data.featured);
-const homePath = getRelativeLocaleUrl(locale, "");
+const posts = getSortedPosts(await getCollection("posts"));
 ---
 
 <Layout>
   <Header />
   <main
     id="main-content"
+    class="app-layout"
     data-layout="index"
-    data-home-path={homePath}
-    class="app-layout my-1"
+    data-home-path="/"
   >
-    <section id="hero" class="border-border border-b pt-8 pb-6">
-      <h1 class="my-4 inline-block text-4xl font-bold sm:my-8 sm:text-5xl">
-        Mingalaba
-      </h1>
-      <a
-        target="_blank"
-        href={`${import.meta.env.BASE_URL.replace(/\/?$/, "/")}rss.xml`}
-        class="inline-block"
-        aria-label="RSS Feed"
-        title="RSS Feed"
-      >
-        <IconRss
-          width={20}
-          height={20}
-          class="stroke-accent scale-125 stroke-3 rtl:-rotate-90"
-        />
-        <span class="sr-only">RSS Feed</span>
-      </a>
-
+    <section class="garden-hero">
+      <div class="garden-intro">折腾怪的学习笔记</div>
+      <h1>今天学到的，<br />留给明天的自己。</h1>
       <p>
-        AstroPaper is a minimal, responsive, accessible and SEO-friendly Astro
-        blog theme. This theme follows best practices and provides accessibility
-        out of the box. Light and dark mode are supported by default. Moreover,
-        additional color schemes can also be configured.
+        写代码，试想法，弄明白问题。<br
+          class="hidden sm:block"
+        />把学习中的实践与思考，慢慢种在这座小花园里。
       </p>
-      <p class="mt-2">
-        Read the blog posts or check{" "}
-        <LinkButton
-          class="hover:text-accent underline decoration-dashed underline-offset-4"
-          href="https://github.com/satnaing/astro-paper#readme"
-        >
-          README
-        </LinkButton>{" "}
-        for more info.
-      </p>
-      {
-        socials.length > 0 && (
-          <div class="mt-4 flex max-sm:flex-col sm:items-center">
-            <div class="me-2 mb-1 whitespace-nowrap sm:mb-0">
-              {t.home.socialLinks}:
-            </div>
-            <Socials />
-          </div>
-        )
-      }
     </section>
-
-    {
-      featuredPosts.length > 0 && (
-        <section
-          id="featured"
-          class:list={[
-            "pt-12 pb-6",
-            { "border-border border-b": recentPosts.length > 0 },
-          ]}
+    <div class="garden-grid">
+      <section aria-labelledby="latest-heading">
+        <h2 id="latest-heading" class="section-title">
+          最新文章 <small>{posts.length} 篇积累</small>
+        </h2>
+        <ul>
+          {
+            posts
+              .slice(0, config.posts.perIndex)
+              .map(post => <Card {...post} />)
+          }
+        </ul>
+        <a
+          href="/posts/"
+          class="text-accent mt-5 inline-block text-sm hover:underline"
+          >浏览全部文章</a
         >
-          <h2 class="text-2xl font-semibold tracking-wide">
-            {t.home.featured}
-          </h2>
-          <ul>
-            {featuredPosts.map(data => (
-              <Card variant="h3" {...data} />
-            ))}
-          </ul>
-        </section>
-      )
-    }
-
-    {
-      recentPosts.length > 0 && (
-        <section id="recent-posts" class="pt-12 pb-6">
-          <h2 class="text-2xl font-semibold tracking-wide">
-            {t.home.recentPosts}
-          </h2>
-          <ul>
-            {recentPosts.slice(0, postsConfig.perIndex).map(data => (
-              <Card variant="h3" {...data} />
-            ))}
-          </ul>
-        </section>
-      )
-    }
-
-    <div class="my-8 text-center">
-      <LinkButton href={getRelativeLocaleUrl(locale, "posts")}>
-        {t.home.allPosts}
-        <IconArrowRight class="inline-block rtl:-rotate-180" />
-      </LinkButton>
+      </section>
+      <aside class="garden-aside">
+        <h2 class="section-title">正在整理</h2>
+        <p>个人博客搭建<br />从技术选型到持续写作。</p>
+        <a href="/topics/" class="text-sm hover:underline">阅读专题目录</a>
+        <hr class="border-border my-5" />
+        <h2 class="section-title">保持联系</h2>
+        <p>用 RSS 订阅，在你喜欢的阅读器里接收新文章。</p>
+        <a href="/rss.xml" class="text-sm hover:underline">订阅折腾花园</a>
+      </aside>
     </div>
   </main>
   <Footer />
 </Layout>
-
 <script>
   document.addEventListener("astro:page-load", () => {
-    const indexLayout = (document.querySelector("#main-content") as HTMLElement)
-      ?.dataset;
-    const baseRoot = import.meta.env.BASE_URL.replace(/\/?$/, "/");
-    if (indexLayout?.layout) {
-      sessionStorage.setItem("backUrl", indexLayout.homePath ?? baseRoot);
-    }
+    if (document.querySelector('[data-layout="index"]'))
+      sessionStorage.setItem("backUrl", "/");
   });
 </script>

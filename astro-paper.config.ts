@@ -1,45 +1,27 @@
 import { defineAstroPaperConfig } from "./src/types/config";
 
+const siteUrl = process.env.SITE_URL || process.env.CF_PAGES_URL || "http://localhost:4321";
+
 export default defineAstroPaperConfig({
   site: {
-    url: "https://astro-paper.pages.dev/",
-    title: "AstroPaper",
-    description: "A minimal, responsive and SEO-friendly Astro blog theme.",
-    author: "Sat Naing",
-    profile: "https://satna.ing",
-    ogImage: "default-og.jpg",
-    lang: "en",
-    timezone: "Asia/Bangkok",
+    url: siteUrl,
+    title: "折腾花园",
+    description: "折腾怪的技术学习笔记：记录问题、实践过程，以及终于想明白的那一刻。",
+    author: "折腾怪",
+    profile: "https://github.com/FishInSalt",
+    lang: "zh-CN",
+    timezone: "Asia/Shanghai",
     dir: "ltr",
   },
-  posts: {
-    perPage: 4,
-    perIndex: 4,
-    scheduledPostMargin: 15 * 60 * 1000,
-  },
+  posts: { perPage: 8, perIndex: 4, scheduledPostMargin: 0 },
   features: {
     lightAndDarkMode: true,
-    dynamicOgImage: true,
+    dynamicOgImage: false,
     showArchives: true,
     showBackButton: true,
-    editPost: {
-      enabled: true,
-      url: "https://github.com/satnaing/astro-paper/edit/main/",
-    },
+    editPost: { enabled: false },
     search: "pagefind",
   },
-  socials: [
-    { name: "github",   url: "https://github.com/satnaing/astro-paper" },
-    { name: "x",        url: "https://x.com/username" },
-    { name: "linkedin", url: "https://www.linkedin.com/in/username/" },
-    { name: "mail",     url: "mailto:yourmail@gmail.com" },
-  ],
-  shareLinks: [
-    { name: "whatsapp", url: "https://wa.me/?text=" },
-    { name: "facebook", url: "https://www.facebook.com/sharer.php?u=" },
-    { name: "x",        url: "https://x.com/intent/post?url=" },
-    { name: "telegram", url: "https://t.me/share/url?url=" },
-    { name: "pinterest", url: "https://pinterest.com/pin/create/button/?url=" },
-    { name: "mail",     url: "mailto:?subject=See%20this%20post&body=" },
-  ],
+  socials: [{ name: "github", url: "https://github.com/FishInSalt", linkTitle: "折腾怪的 GitHub" }],
+  shareLinks: [],
 });
