@@ -2,6 +2,12 @@
 
 折腾怪的个人技术博客。基于 Astro 7 和 AstroPaper 6.1，Markdown 写作，静态生成，Pagefind 搜索。
 
+- 在线博客：[折腾花园](https://zheteng-garden.pages.dev/)
+- 搭建记录：[从零搭建「折腾花园」：Astro 技术博客实践](https://zheteng-garden.pages.dev/posts/building-zheteng-garden/)
+- 源码仓库：[FishInSalt/zheteng-garden](https://github.com/FishInSalt/zheteng-garden)（私有）
+
+Cloudflare Pages 已连接此仓库，推送 `main` 会自动发布。当前使用平台提供的域名，尚未绑定自定义域名。
+
 ## 本地运行
 
 建议 Node.js 24（见 `.nvmrc`）和 pnpm 11.19.0（见 `package.json`）。
@@ -59,6 +65,8 @@ SITE_URL=https://your-domain.example pnpm build
 ## 访问统计
 
 在 Pages 项目的 Metrics → Web Analytics 中启用，再部署一次。Cloudflare 会自动注入统计脚本。代码里没有手动植入 token，避免自动注入与手动脚本重复计数。
+
+本站已在 Pages 后台启用 Web Analytics。查看数据：Cloudflare → Workers & Pages → `zheteng-garden` → Metrics → View Web Analytics。
 
 启用后请实际检查统计后台是否收到访问数据。统计依赖浏览器上报，不等同于完整的服务器访问日志。
 
