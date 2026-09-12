@@ -4,9 +4,11 @@
 
 - 在线博客：[折腾花园](https://zheteng-garden.pages.dev/)
 - 搭建记录：[从零搭建「折腾花园」：Astro 技术博客实践](https://zheteng-garden.pages.dev/posts/building-zheteng-garden/)
-- 源码仓库：[FishInSalt/zheteng-garden](https://github.com/FishInSalt/zheteng-garden)（私有）
+- 源码仓库：[FishInSalt/zheteng-garden](https://github.com/FishInSalt/zheteng-garden)（公开）
 
 Cloudflare Pages 已连接此仓库，推送 `main` 会自动发布。当前使用平台提供的域名，尚未绑定自定义域名。
+
+本仓库作为网站发布仓库，只保存愿意公开的文章、代码和资源。`draft: true` 只控制网站是否展示文章，不会隐藏公开仓库中的文件；私人笔记和未准备公开的草稿应保存在仓库之外。
 
 ## 本地运行
 

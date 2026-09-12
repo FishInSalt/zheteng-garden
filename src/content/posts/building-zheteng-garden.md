@@ -161,7 +161,7 @@ RSS 输出到 `/rss.xml`，Sitemap 输出到 `/sitemap-index.xml`。它们与页
 
 ## 连接 GitHub 和 Cloudflare Pages
 
-本站使用私有 GitHub 仓库 `FishInSalt/zheteng-garden` 保存源码，Cloudflare Pages 项目名为 `zheteng-garden`。GitHub 的 `main` 分支连接到生产环境，推送提交后会自动构建发布。
+本站使用公开 GitHub 仓库 [FishInSalt/zheteng-garden](https://github.com/FishInSalt/zheteng-garden) 保存源码，Cloudflare Pages 项目名为 `zheteng-garden`。GitHub 的 `main` 分支连接到生产环境，推送提交后会自动构建发布。仓库最初设为私有，后来明确作为网站发布仓库后改为公开，只保存愿意公开的文章、代码和资源。
 
 先将项目保存到 GitHub。源码仓库可以保持私有，网站页面仍可以公开访问。仓库中应保留文章、源码和锁文件，不提交 `node_modules`、`dist`、本地环境文件和访问令牌。
 
