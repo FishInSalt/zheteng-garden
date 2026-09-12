@@ -1,3 +1,6 @@
 allowBuilds:
   esbuild: true
   sharp: true
+overrides:
+  # markdown-satteri 0.3.2 pins the older helper and its vulnerable YAML/TOML parsers.
+  "@astrojs/internal-helpers@0.10.0": 0.10.4

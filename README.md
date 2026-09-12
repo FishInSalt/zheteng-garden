@@ -76,6 +76,10 @@ SITE_URL=https://your-domain.example pnpm build
 
 使用了自定义 pnpm store 时，后续安装和执行命令应保持相同的 store 配置；也可以用 `npm run build` 执行现有依赖中的构建脚本，无需改用 npm 安装依赖。
 
+## 依赖维护
+
+上线时已将 Astro 更新到 7.3.2，并更新兼容范围内的依赖。`pnpm-workspace.yaml` 中将旧版 `@astrojs/internal-helpers@0.10.0` 定向覆盖到 0.10.4，修复可选依赖链中的 YAML/TOML 解析器告警；上游修复依赖声明后可移除此覆盖。升级后运行 `pnpm audit` 和 `pnpm build`，再检查文章与搜索。
+
 ## 来源与许可证
 
 基于 [AstroPaper](https://github.com/satnaing/astro-paper)，上游基线提交 `35cfa7fbe0b897306d27670d3819e55d5205f3dd`。保留了上游 MIT 许可证。主要定制包括中文界面、品牌与阅读排版、专题目录、文章目录、无外部字体依赖，以及博客搭建文章。
