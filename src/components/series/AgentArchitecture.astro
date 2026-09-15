@@ -1,0 +1,198 @@
+---
+import "./series-visual.css";
+---
+
+<figure class="agent-map series-visual not-prose">
+  <div class="user">
+    <strong>用户提出任务</strong><span>目标、约束与运行中的补充</span>
+  </div>
+  <div class="connection">
+    ↓ 输入任务 <span aria-hidden="true">／</span> ↑ 显示进度与回答
+  </div>
+  <div class="harness">
+    <p class="boundary">imp · 让模型持续执行任务的运行程序</p>
+    <div class="interface">
+      <strong>交互与任务生命周期</strong><span
+        >CLI / REPL / TUI · 输入、中断、显示</span
+      >
+    </div>
+    <div class="connection">
+      ↓ 启动与控制 <span aria-hidden="true">／</span> ↑ 运行事件
+    </div>
+    <div class="engine">
+      <div class="module">
+        <strong>模型接入</strong><span>统一请求与响应</span><small
+          >对接外部模型服务</small
+        >
+      </div>
+      <span class="exchange" aria-hidden="true">↔</span>
+      <div class="module loop">
+        <strong>执行循环</strong><span>请求模型 → 执行工具</span><small
+          >记录结果，再决定是否继续</small
+        >
+      </div>
+      <span class="exchange" aria-hidden="true">↔</span>
+      <div class="module tools">
+        <strong>工具系统</strong><span>读取、编辑、搜索、命令</span><small
+          >操作文件与命令环境</small
+        >
+      </div>
+    </div>
+    <p class="exchange-description">
+      执行循环通过模型接入层获取回复，调用工具，并把执行结果交回模型。
+    </p>
+    <dl class="support">
+      <div>
+        <dt>上下文与会话</dt><dd>
+          为运行准备信息，保存历史；负责摘要、恢复与分支。
+        </dd>
+      </div>
+      <div>
+        <dt>权限与扩展</dt><dd>
+          控制项目资源加载与工具执行，并提供新能力的接入位置。
+        </dd>
+      </div>
+    </dl>
+    <p class="child">
+      <strong>子代理</strong>通过 task
+      工具启动独立上下文，复用执行循环；需要分离文件时使用 worktree。
+    </p>
+  </div>
+  <figcaption>
+    职责示意图。上下文、会话、权限与扩展参与运行的不同阶段；测试与评估覆盖这些模块。
+  </figcaption>
+</figure>
+
+<style>
+  .agent-map {
+    margin: 2rem 0;
+    font-size: 0.9rem;
+    line-height: 1.65;
+    color: var(--series-ink);
+  }
+  .user {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.15rem;
+  }
+  .user span,
+  .module small,
+  .interface span {
+    color: var(--series-secondary);
+    font-size: 0.8rem;
+  }
+  .connection {
+    padding: 0.7rem 0;
+    text-align: center;
+    color: var(--series-secondary);
+    font-size: 0.8rem;
+  }
+  .harness {
+    border: 1px solid var(--series-rule);
+    border-top: 3px solid var(--series-blue);
+    padding: 1.1rem;
+    background: var(--series-paper);
+  }
+  .boundary {
+    margin: 0 0 1rem;
+    color: var(--series-secondary);
+    font-size: 0.8rem;
+  }
+  .interface {
+    display: flex;
+    flex-direction: column;
+    text-align: center;
+  }
+  .engine {
+    display: grid;
+    grid-template-columns: 1fr auto 1.25fr auto 1fr;
+    align-items: stretch;
+    gap: 0.35rem;
+  }
+  .module {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 0.35rem;
+    padding: 0.75rem 0.4rem;
+    text-align: center;
+    min-width: 0;
+  }
+  .module strong {
+    font-size: 0.95rem;
+  }
+  .module span {
+    font-size: 0.8rem;
+  }
+  .loop {
+    background: var(--series-blue-wash);
+    border: 1px solid var(--series-blue);
+    border-radius: 0.4rem;
+  }
+  .tools {
+    border-bottom: 2px solid var(--series-feedback);
+  }
+  .tools small {
+    color: var(--series-feedback);
+  }
+  .exchange {
+    align-self: center;
+    color: var(--series-blue);
+  }
+  .exchange-description {
+    margin: 0.9rem 0;
+    font-size: 0.8rem;
+    color: var(--series-secondary);
+  }
+  .support {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1.1rem;
+    margin: 1rem 0 0;
+    border-top: 1px solid var(--series-rule);
+    padding-top: 1rem;
+  }
+  .support dt {
+    font-weight: 600;
+  }
+  .support dd {
+    margin: 0.3rem 0 0;
+    font-size: 0.8rem;
+    color: var(--series-secondary);
+  }
+  .child {
+    margin: 1rem 0 0;
+    border-top: 1px dashed var(--series-rule);
+    padding-top: 0.8rem;
+    font-size: 0.8rem;
+  }
+  .child strong {
+    margin-right: 0.5rem;
+  }
+  .agent-map figcaption {
+    margin: 0.65rem 0 0;
+    font-size: 0.8rem;
+    color: var(--series-secondary);
+  }
+  @media (max-width: 540px) {
+    .harness {
+      padding: 1rem;
+    }
+    .engine {
+      grid-template-columns: 1fr;
+      gap: 0.2rem;
+    }
+    .module {
+      padding: 0.6rem;
+    }
+    .exchange {
+      justify-self: center;
+      transform: rotate(90deg);
+    }
+    .support {
+      grid-template-columns: 1fr;
+      gap: 0.8rem;
+    }
+  }
+</style>

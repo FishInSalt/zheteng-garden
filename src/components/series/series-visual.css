@@ -1,0 +1,21 @@
+/* Local to series figures: no changes to the blog's global reading theme. */
+.series-visual {
+  --series-canvas: #f4f6fa;
+  --series-paper: #ffffff;
+  --series-ink: #243244;
+  --series-secondary: #59677b;
+  --series-rule: #ced7e3;
+  --series-blue: #2855bd;
+  --series-blue-wash: #edf2ff;
+  --series-feedback: #087c6e;
+}
+[data-theme="dark"] .series-visual {
+  --series-canvas: #202d40;
+  --series-paper: #1b293b;
+  --series-ink: #e4ebf5;
+  --series-secondary: #b1bfd2;
+  --series-rule: #46576e;
+  --series-blue: #a1bcff;
+  --series-blue-wash: #293d62;
+  --series-feedback: #80d5c0;
+}

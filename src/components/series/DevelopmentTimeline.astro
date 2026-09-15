@@ -1,0 +1,121 @@
+---
+import "./series-visual.css";
+import { impMilestones } from "@/data/coding-agent-series";
+---
+
+<figure class="development-timeline series-visual not-prose">
+  <ol>
+    {
+      impMilestones.map(item => (
+        <li>
+          <time datetime={item.date}>{item.period}</time>
+          <div class="milestone">
+            <strong>{item.title}</strong>
+            <p>{item.work}</p>
+            <p class="lesson">{item.lesson}</p>
+            <div class="sources">
+              {item.commits.map(commit => (
+                <a
+                  href={`https://github.com/FishInSalt/imp/commit/${commit.id}`}
+                >
+                  {commit.label}
+                  <span class="commit">{commit.id.slice(0, 7)}</span>
+                </a>
+              ))}
+            </div>
+          </div>
+        </li>
+      ))
+    }
+  </ol>
+  <figcaption>
+    按 Git
+    主线记录整理的阶段性里程碑，日期表示改动进入历史的时间，不代表各阶段的实际耗时。链接指向对应提交。
+  </figcaption>
+</figure>
+<style>
+  .development-timeline {
+    margin: 2rem 0;
+    color: var(--series-ink);
+    line-height: 1.7;
+    font-size: 0.9rem;
+  }
+  .development-timeline ol {
+    padding: 0;
+    margin: 0;
+    list-style: none;
+  }
+  .development-timeline li {
+    display: grid;
+    grid-template-columns: 7.3rem 1fr;
+    gap: 0.8rem;
+    padding: 0;
+    margin: 0;
+  }
+  .development-timeline time {
+    color: var(--series-secondary);
+    font-size: 0.8rem;
+    font-variant-numeric: tabular-nums;
+    padding-top: 0.1rem;
+  }
+  .milestone {
+    position: relative;
+    padding: 0 0 1.7rem 1.2rem;
+    border-left: 1px solid var(--series-rule);
+    min-width: 0;
+  }
+  .milestone::before {
+    content: "";
+    position: absolute;
+    width: 0.5rem;
+    height: 0.5rem;
+    left: -0.28rem;
+    top: 0.5rem;
+    border-radius: 50%;
+    background: var(--series-blue);
+  }
+  .development-timeline li:last-child .milestone {
+    padding-bottom: 0.7rem;
+  }
+  .milestone p {
+    margin: 0.35rem 0 0;
+  }
+  .milestone .lesson {
+    color: var(--series-secondary);
+    font-size: 0.8rem;
+  }
+  .sources {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem 1rem;
+    margin-top: 0.55rem;
+  }
+  .sources a {
+    color: var(--series-blue);
+    font-size: 0.75rem;
+    text-decoration: underline;
+    text-underline-offset: 0.2em;
+  }
+  .commit {
+    margin-left: 0.35rem;
+    font-family: ui-monospace, monospace;
+  }
+  .sources a:focus-visible {
+    outline: 2px solid var(--series-blue);
+    outline-offset: 3px;
+  }
+  .development-timeline figcaption {
+    font-size: 0.8rem;
+    margin-top: 0.6rem;
+    color: var(--series-secondary);
+  }
+  @media (max-width: 540px) {
+    .development-timeline li {
+      grid-template-columns: 1fr;
+      gap: 0.4rem;
+    }
+    .development-timeline time {
+      margin-left: 1.2rem;
+    }
+  }
+</style>

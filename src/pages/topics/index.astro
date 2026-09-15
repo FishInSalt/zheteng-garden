@@ -8,9 +8,28 @@ import Main from "@/components/Main.astro";
 import { getSortedPosts } from "@/utils/getSortedPosts";
 import { getPostUrl } from "@/utils/getPostPaths";
 import config from "@/config";
-const posts = getSortedPosts(await getCollection("posts")).filter(p =>
-  p.data.tags.includes("博客搭建")
+
+const posts = getSortedPosts(await getCollection("posts")).sort(
+  (a, b) => a.data.pubDatetime.getTime() - b.data.pubDatetime.getTime()
 );
+const topics = [
+  {
+    id: "coding-agent",
+    title: "Coding Agent 原理与实践：imp 开发手记",
+    tag: "Coding Agent",
+    description:
+      "记录从零开发 imp 的过程，按核心模块解释 Coding Agent 的原理、伪代码实现与工程取舍。",
+    outline:
+      "阅读路线：最小执行闭环 → 模型与工具 → 上下文与会话 → 交互与权限 → 扩展、协作与验证。",
+  },
+  {
+    id: "building-a-blog",
+    title: "个人博客搭建",
+    tag: "博客搭建",
+    description: "从框架与主题选择，到中文适配、内容管理、搜索和部署。",
+    outline: undefined,
+  },
+];
 ---
 
 <Layout
@@ -19,24 +38,40 @@ const posts = getSortedPosts(await getCollection("posts")).filter(p =>
 >
   <Header /><Breadcrumb />
   <Main pageTitle="专题" pageDesc="把零散的知识，整理成可以循序阅读的目录。">
-    <section class="topic-card">
-      <h2>个人博客搭建</h2>
-      <p>从框架与主题选择，到中文适配、内容管理、搜索和部署。</p>
-      <ol class="mt-5 list-decimal space-y-3 pl-5">
-        {
-          posts.map(post => (
-            <li>
-              <a
-                class="text-accent hover:underline"
-                href={getPostUrl(post.id, post.filePath)}
-              >
-                {post.data.title}
-              </a>
-            </li>
-          ))
-        }
-      </ol>
-      <p class="mt-5 text-sm">已整理 {posts.length} 篇文章</p>
-    </section>
+    {
+      topics.map(topic => {
+        const topicPosts = posts.filter(post =>
+          post.data.tags.includes(topic.tag)
+        );
+        return (
+          <section class="topic-card" aria-labelledby={topic.id}>
+            <h2 id={topic.id}>{topic.title}</h2>
+            <p>{topic.description}</p>
+            {topic.outline && <p>{topic.outline}</p>}
+            {topicPosts.length > 0 ? (
+              <>
+                <ol class="mt-5 list-decimal space-y-3 pl-5">
+                  {topicPosts.map(post => (
+                    <li>
+                      <a
+                        class="text-accent hover:underline"
+                        href={getPostUrl(post.id, post.filePath)}
+                      >
+                        {post.data.title}
+                      </a>
+                    </li>
+                  ))}
+                </ol>
+                <p class="mt-5 text-sm">已整理 {topicPosts.length} 篇文章</p>
+              </>
+            ) : (
+              <p class="mt-5 text-sm">
+                专题筹备中，文章发布后将在这里按顺序收录。
+              </p>
+            )}
+          </section>
+        );
+      })
+    }
   </Main><Footer />
 </Layout>
