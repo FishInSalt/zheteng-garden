@@ -1,6 +1,6 @@
 # 折腾花园
 
-折腾怪的个人技术博客。基于 Astro 7 和 AstroPaper 6.1，Markdown 写作，静态生成，Pagefind 搜索。
+折腾怪的个人技术博客。基于 Astro 7 和 AstroPaper 6.1，Markdown / MDX 写作，静态生成，Pagefind 搜索。
 
 - 在线博客：[折腾花园](https://zheteng-garden.pages.dev/)
 - 搭建记录：[从零搭建「折腾花园」：Astro 技术博客实践](https://zheteng-garden.pages.dev/posts/building-zheteng-garden/)
@@ -30,11 +30,15 @@ pnpm preview --host 127.0.0.1 --port 4321
 
 ## 写文章
 
-在 `src/content/posts/` 新建 Markdown 文件。参考已有的 `building-zheteng-garden.md`，填写标题、作者、日期、摘要和标签。`draft: true` 会排除公开输出；未来日期的文章需在到期后重新构建才会发布。
+在 `src/content/posts/` 新建 Markdown 或 MDX 文件。参考已有的 `building-zheteng-garden.md`，填写标题、作者、日期、摘要和标签。`draft: true` 会排除公开输出；未来日期的文章需在到期后重新构建才会发布。
 
-文章的固定链接还与文件所在子目录有关，发布后尽量不要移动文件。专题目录位于 `src/pages/topics/index.astro`，目前收集带“博客搭建”标签的文章。
+文章的固定链接还与文件所在子目录有关，发布后尽量不要移动文件。专题目录位于 `src/pages/topics/index.astro`，按“博客搭建”和“Coding Agent”标签分别收录文章，并按首次发布时间从早到晚排列。草稿不会出现在专题中。
 
 首篇技术博客：`src/content/posts/building-zheteng-garden.md`。
+
+Coding Agent 系列记录 imp 的开发过程，按核心模块解释原理与伪代码实现，面向有使用经验的读者。章节按理解依赖排列，章内记录实际开发演进。选题、各章展示清单与写作约定见 [系列规划](docs/coding-agent-series.md)，开篇文章为 `src/content/posts/coding-agent-00-under-the-hood.mdx`。
+
+系列使用 MDX 引用 `src/components/series/` 中的静态图示组件，章节与里程碑数据位于 `src/data/coding-agent-series.ts`。图示采用局部明暗配色与手机布局。目录只链接已发布文章，未发布章节显示为计划。00 已设为正式文章，可通过本地开发或构建预览阅读。后续草稿在开发模式也会过滤，可用临时副本预览，详见系列规划。
 
 ## 改配置
 

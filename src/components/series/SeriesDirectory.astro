@@ -1,0 +1,95 @@
+---
+import "./series-visual.css";
+import { getCollection } from "astro:content";
+import { codingAgentChapters } from "@/data/coding-agent-series";
+import { getSortedPosts } from "@/utils/getSortedPosts";
+import { getPostUrl } from "@/utils/getPostPaths";
+interface Props {
+  current?: string;
+}
+const { current } = Astro.props;
+const published = getSortedPosts(await getCollection("posts"));
+---
+
+<nav
+  class="series-directory series-visual not-prose"
+  aria-label="Coding Agent 系列章节"
+>
+  <ol>
+    {
+      codingAgentChapters.map(chapter => {
+        const post = published.find(entry => entry.id === chapter.postId);
+        const isCurrent = chapter.number === current;
+        return (
+          <li aria-current={isCurrent ? "page" : undefined}>
+            <span class="number" aria-hidden="true">
+              {chapter.number}
+            </span>
+            <div>
+              {post && !isCurrent ? (
+                <a href={getPostUrl(post.id, post.filePath)}>{chapter.title}</a>
+              ) : (
+                <strong>{chapter.title}</strong>
+              )}
+              <p>{chapter.question}</p>
+            </div>
+            <span class="status">
+              {isCurrent ? "本篇" : post ? "已发布" : "计划"}
+            </span>
+          </li>
+        );
+      })
+    }
+  </ol>
+</nav>
+<style>
+  .series-directory {
+    margin: 1.5rem 0;
+    color: var(--series-ink);
+    font-size: 0.9rem;
+    line-height: 1.65;
+  }
+  .series-directory ol {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .series-directory li {
+    display: grid;
+    grid-template-columns: 1.7rem 1fr auto;
+    align-items: start;
+    gap: 0.7rem;
+    padding: 0.9rem 0;
+    border-top: 1px solid var(--series-rule);
+    margin: 0;
+  }
+  .series-directory li:last-child {
+    border-bottom: 1px solid var(--series-rule);
+  }
+  .series-directory .number {
+    color: var(--series-blue);
+    font-variant-numeric: tabular-nums;
+  }
+  .series-directory p {
+    margin: 0.2rem 0 0;
+    color: var(--series-secondary);
+    font-size: 0.8rem;
+  }
+  .series-directory .status {
+    font-size: 0.7rem;
+    color: var(--series-secondary);
+    padding-top: 0.2rem;
+  }
+  .series-directory a {
+    color: var(--series-blue);
+    text-decoration: underline;
+    text-underline-offset: 0.2em;
+  }
+  .series-directory a:focus-visible {
+    outline: 2px solid var(--series-blue);
+    outline-offset: 3px;
+  }
+  .series-directory [aria-current="page"] .status {
+    color: var(--series-blue);
+  }
+</style>
