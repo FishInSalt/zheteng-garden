@@ -4,7 +4,10 @@ const DARK = "dark";
 
 function getPreferredTheme(): string {
   const stored = localStorage.getItem(THEME_KEY);
-  return stored === DARK ? DARK : LIGHT;
+  if (stored === LIGHT || stored === DARK) return stored;
+  return window.matchMedia("(prefers-color-scheme: dark)").matches
+    ? DARK
+    : LIGHT;
 }
 
 // Reuse the value already set by the inline FOUC-prevention script if available.
@@ -61,3 +64,13 @@ document.addEventListener("astro:before-swap", event => {
       ?.setAttribute("content", color);
   }
 });
+
+// Follow system changes until the reader explicitly chooses a theme.
+window
+  .matchMedia("(prefers-color-scheme: dark)")
+  .addEventListener("change", ({ matches }) => {
+    const stored = localStorage.getItem(THEME_KEY);
+    if (stored === LIGHT || stored === DARK) return;
+    themeValue = matches ? DARK : LIGHT;
+    reflect();
+  });
