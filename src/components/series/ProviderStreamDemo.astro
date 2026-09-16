@@ -1,6 +1,10 @@
 ---
 import "./series-visual.css";
-import { providerScenarios } from "@/data/provider-stream-demo";
+import {
+  providerScenarios,
+  providerCodeLines,
+  describeActiveLines,
+} from "@/data/provider-stream-demo";
 const first = providerScenarios[0].steps[0];
 ---
 
@@ -27,10 +31,21 @@ const first = providerScenarios[0].steps[0];
     <strong data-title>{first.title}</strong>
     <p data-detail>{first.detail}</p>
   </div>
-  <section class="code-position" aria-label="当前处理代码">
-    <div class="panel-heading">
-      当前处理代码
-    </div><pre><code data-code>{first.code}</code></pre>
+  <section class="code-position" aria-label="核心代码与当前执行位置">
+    <div class="code-heading">
+      <strong>核心代码</strong>
+      <span data-active-lines>{describeActiveLines(first.activeSections)}</span>
+    </div>
+    <p class="code-hint">
+      滚动可查看全部代码；高亮随步骤移动。辅助函数见第 2 节。
+    </p>
+    <pre
+      class="code-viewport"
+      data-code-viewport
+      tabindex="0"
+      aria-label="完整核心代码，可滚动查看"><code data-code>{providerCodeLines.map(line => (
+      <span class="code-line" data-section={line.section} data-active={first.activeSections.includes(line.section) ? "true" : "false"}><span class="line-number" aria-hidden="true" data-line-number={line.number} /><span class="line-text">{line.text || " "}</span></span>
+    ))}</code></pre>
   </section>
   <div class="panels">
     <section aria-label="本次收到的事件">
@@ -47,10 +62,10 @@ const first = providerScenarios[0].steps[0];
   <section
     class="output"
     data-outcome="waiting"
-    aria-label="交给执行循环的结果"
+    aria-label="交给 Agent 循环的结果"
   >
     <div class="panel-heading">
-      交给执行循环
+      交给 Agent 循环
     </div><pre><code data-output>{first.output}</code></pre>
   </section>
   <noscript>
@@ -69,7 +84,11 @@ const first = providerScenarios[0].steps[0];
   </noscript>
 </provider-stream-demo>
 <script>
-  import { providerScenarios } from "@/data/provider-stream-demo";
+  import {
+    providerScenarios,
+    describeActiveLines,
+    type ProviderCodeSection,
+  } from "@/data/provider-stream-demo";
   class ProviderStreamDemo extends HTMLElement {
     private listeners?: AbortController;
     connectedCallback() {
@@ -83,12 +102,17 @@ const first = providerScenarios[0].steps[0];
       let scenario = providerScenarios[0];
       let index = 0;
       select.value = scenario.id;
-      const render = () => {
+      const codeViewport = this.querySelector<HTMLElement>(
+        "[data-code-viewport]"
+      )!;
+      const codeLines = Array.from(
+        this.querySelectorAll<HTMLElement>("[data-section]")
+      );
+      const render = (followCode = true) => {
         const step = scenario.steps[index];
         for (const key of [
           "title",
           "detail",
-          "code",
           "incoming",
           "cache",
           "output",
@@ -99,6 +123,38 @@ const first = providerScenarios[0].steps[0];
           `步骤 ${index + 1} / ${scenario.steps.length}`;
         this.querySelector<HTMLElement>("[data-outcome]")!.dataset.outcome =
           step.outcome;
+        const active = codeLines.filter(line => {
+          const selected = step.activeSections.includes(
+            line.dataset.section as ProviderCodeSection
+          );
+          line.dataset.active = String(selected);
+          return selected;
+        });
+        this.querySelector("[data-active-lines]")!.textContent =
+          describeActiveLines(step.activeSections);
+        if (followCode && active.length > 0) {
+          // Scroll this panel only; never move the page or keyboard focus.
+          const viewportRect = codeViewport.getBoundingClientRect();
+          const first = active[0].getBoundingClientRect();
+          const last = active[active.length - 1].getBoundingClientRect();
+          if (
+            first.top < viewportRect.top ||
+            last.bottom > viewportRect.bottom
+          ) {
+            const focus =
+              last.bottom - first.top <= codeViewport.clientHeight - 32
+                ? active[0]
+                : active.find(
+                    line => line.dataset.section === step.activeSections.at(-1)
+                  )!;
+            const top =
+              focus.getBoundingClientRect().top -
+              viewportRect.top +
+              codeViewport.scrollTop -
+              16;
+            codeViewport.scrollTop = Math.max(0, top);
+          }
+        }
         prev.disabled = index === 0;
         next.disabled = index === scenario.steps.length - 1;
       };
@@ -137,7 +193,7 @@ const first = providerScenarios[0].steps[0];
         },
         { signal }
       );
-      render();
+      render(false);
       this.querySelector<HTMLElement>("[data-controls]")!.hidden = false;
     }
     disconnectedCallback() {
@@ -261,6 +317,66 @@ const first = providerScenarios[0].steps[0];
   .code-position {
     background: var(--series-canvas);
   }
+
+  .code-heading {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 0.3rem 0.8rem;
+  }
+  [data-active-lines],
+  .code-hint {
+    color: var(--series-secondary);
+    font-size: 0.75rem;
+  }
+  .code-position .code-viewport {
+    margin-top: 0.75rem;
+    padding: 0.5rem 0;
+    max-height: 26rem;
+    overflow: auto;
+    overscroll-behavior: contain;
+    white-space: normal;
+    background: var(--series-paper);
+    border: 1px solid var(--series-rule);
+    border-radius: 0.3rem;
+    position: relative;
+  }
+  .code-viewport:focus-visible {
+    outline: 2px solid var(--series-blue);
+    outline-offset: 2px;
+  }
+  .code-line {
+    display: flex;
+    align-items: baseline;
+    border-left: 3px solid transparent;
+    padding-right: 0.6rem;
+    min-height: 1.75em;
+  }
+  .code-line[data-active="true"] {
+    background: var(--series-blue-wash);
+    border-left-color: var(--series-blue);
+  }
+  .line-number {
+    flex: 0 0 3.2em;
+    padding-right: 0.8em;
+    text-align: right;
+    user-select: none;
+    color: var(--series-secondary);
+  }
+  .line-number::before {
+    content: attr(data-line-number);
+  }
+  .code-line[data-active="true"] .line-number {
+    color: var(--series-blue);
+    font-weight: 700;
+  }
+  .line-text {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    min-width: 0;
+  }
+
   .output[data-outcome="ready"] {
     border-left: 3px solid var(--series-feedback);
   }

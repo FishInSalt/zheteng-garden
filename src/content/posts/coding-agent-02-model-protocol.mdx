@@ -1,6 +1,7 @@
 ---
 author: 折腾怪
 pubDatetime: 2026-09-16T07:13:40Z
+modDatetime: 2026-09-16T13:03:58Z
 title: "Coding Agent 原理与实践 02（上）：模型接入：请求与消息转换"
 featured: false
 draft: false
@@ -324,6 +325,6 @@ if (!response.ok || !response.body) {
 
 模型接入层把同一段历史转换成服务能接收的格式：用户任务、模型的工具请求、工具结果各有对应位置，工具定义则单独说明可以调用什么。
 
-请求被接受后，返回的内容往往会分批到达。下一篇「模型接入：流式响应与组装」（待发布）继续看：半截工具参数该存在哪里，什么时候才算拿到一条可以交给 Agent 循环的完整回复。
+请求被接受后，返回的内容往往会分批到达。下一篇[《模型接入：流式响应与组装》](/posts/coding-agent-02-streaming/)继续看：半截工具参数该存在哪里，什么时候才算拿到一条可以交给 Agent 循环的完整回复。
 
 协议字段可对照 [OpenAI 的函数调用文档](https://developers.openai.com/api/docs/guides/function-calling)；本文的转换和错误处理以链接的 imp 源码为例。

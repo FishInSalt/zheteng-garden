@@ -1,9 +1,9 @@
 ---
 author: 折腾怪
-pubDatetime: 2026-09-16T02:42:38Z
+pubDatetime: 2026-09-16T13:03:58Z
 title: "Coding Agent 原理与实践 02（下）：模型接入：流式响应与组装"
 featured: false
-draft: true
+draft: false
 tags:
   - Coding Agent
   - imp
@@ -13,23 +13,28 @@ description: 从一次读取 README 的工具请求出发，逐步观察流式�
 
 import ProviderStreamDemo from "@/components/series/ProviderStreamDemo.astro";
 
-## 1. 工具请求只收到一半，能开始读文件吗
+## 1. 为什么 Agent 的回答会逐渐出现在屏幕上
 
-[上篇](/posts/coding-agent-02-model-protocol/)已经把“读取 README.md，告诉我项目怎样启动”这个任务和工具说明发给模型。
+使用 Coding Agent 时，回答往往是一段一段显示出来的。这是因为模型服务在生成过程中陆续返回内容，Agent 收到文字片段后，就把它交给界面显示。因此，我们可以在整条回复生成完毕之前，先看到已经返回的部分。
 
-模型决定调用读取工具，但回复不一定一次到齐。接入层可能先知道“要调用 read”，过一会儿才收到文件路径的前半段，最后才收到剩余部分。
+这种返回方式叫作**流式响应**。[上篇](/posts/coding-agent-02-model-protocol/)请求中的 `stream: true`，就是让模型服务以这种方式返回内容。这些片段属于同一次模型调用，接入层需要持续接收。
 
-这时还不能读取文件：半截路径不是完整参数。接入层需要边接收边保存，等这次回复按协议结束，再把完整的工具请求交给执行循环。
+不过，模型的回复不只有显示给用户的文字，还可能包含工具请求。继续看“读取 README.md，告诉我项目怎样启动”这个任务：模型请求调用 `read` 时，工具参数也可能分段到达。接入层已经收到了工具名，文件路径却还没有收全，此时还不能开始读取文件。
 
-文本也会分段到达。不过，文本片段可以先用于显示；工具参数尚未完整时，不能因为界面上已经出现了工具名，就开始执行工具。这一篇看看两种需求怎样在同一次接收中处理。
+这就有了两件需要同时处理的事：**收到的文字可以先用于显示，收到的片段还要保存下来，组装成完整回复。** 本例会在回复按协议结束后，把完整消息交给 Agent 循环，由循环决定是否执行工具。
+
+主流模型 API 通常通过 **SSE（Server-Sent Events，服务器发送事件）** 返回流式响应。服务端把陆续生成的内容放进一个个事件中发送，模型接入层读取这些事件，再从中提取文字和工具参数，逐步组装成完整回复。第 2.1 节会展开事件的读取过程；想了解 SSE 的事件格式，也可以阅读 MDN 的[《使用服务器发送事件》](https://developer.mozilla.org/zh-CN/docs/Web/API/Server-sent_events/Using_server-sent_events)。
 
 ## 2. 对照源码，看回复怎样组装起来
 
-下面仍以 imp 的 [`openai-completions.ts`](https://github.com/FishInSalt/imp/blob/main/src/provider/openai-completions.ts) 为例。上篇取得 `response` 后，这段逻辑继续读取它的响应体。
+下面仍以 imp 的 [`openai-completions.ts`](https://github.com/FishInSalt/imp/blob/main/src/provider/openai-completions.ts) 为例。上篇讲到 `provider.stream` 发出请求并取得 `response`。接下来，同一个函数会继续读取响应体，组装模型回复。
 
-先看整体：接收片段 → 累积文本或参数 → 检查结束状态 → 产出完整回复。保留源码主要变量和判断位置，省略类型、思考内容、用量统计和空回复兜底；工具片段的内部处理在 2.2 展开。这里是源码节选，不能单独运行。
+先看整体过程：**接收片段 → 累积文字和参数 → 检查结束状态 → 产出完整回复。**（可在[第 3 节的交互演示](#3-模拟运行半截路径怎样变成完整参数)中逐步观察这个过程。）
+
+下面保留主要变量和判断，省略类型、思考内容、用量统计等细节，不能单独运行；工具片段的处理在 2.2 展开。
 
 ```ts
+// 位于 openai-completions.ts 的 provider.stream(request) 内。
 const blocks = []; // 最终回复的内容块。
 let textBlock = null;
 const toolByIndex = new Map(); // 工具序号 → 工具请求块。
@@ -87,39 +92,118 @@ yield {
 
 这里的 `yield` 是异步生成器逐次产出事件的写法。调用者用 `for await` 依次接收这些事件。它与普通函数只在最后 `return` 一个结果不同：可以先通知“收到一段文字”，最后再通知“完整消息已经组装好”。
 
-### 2.1 网络读到一块数据，不等于收到一个完整事件
+### 2.1 从响应体中读出完整的 SSE 事件
 
-响应体最先给我们的是字节。一次读取可能只有半条事件，也可能含有好几条事件，所以不能对每次网络读取直接做 `JSON.parse`。
+前面提到，服务通过 SSE 发送事件。事件以文本表示，用空行分隔，`data:` 行携带数据；本例用 JSON 表示模型回复片段。
 
-本例使用 SSE：服务按事件发送文本，以空行分隔事件，`data:` 行携带数据。项目的 [`parseSse`](https://github.com/FishInSalt/imp/blob/main/src/provider/shared.ts) 先把字节解码并暂存，找到完整事件后再解析内容。主要逻辑如下，省略了 `try/finally` 中释放 reader 的部分：
+接入层从响应体读到的最初是字节，一次读取可能只有半条事件，也可能含有好几条事件。因此，需要先识别完整事件，再提取其中的数据做 `JSON.parse`。
+
+核心代码通过 `parseSse(response.body)` 完成这一步。下面是 [`shared.ts`](https://github.com/FishInSalt/imp/blob/main/src/provider/shared.ts) 中的函数节选，`body` 就是传入的响应体；省略类型及释放 reader 的 `try/finally` 结构：
 
 ```ts
-const reader = body.getReader();
-const decoder = new TextDecoder();
-let buffer = "";
+async function* parseSse(body) {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
 
-while (true) {
-  const { done, value } = await reader.read();
-  if (done) break;
-  buffer += decoder.decode(value, { stream: true });
-  let sep = buffer.indexOf("\n\n");
-  while (sep !== -1) {
-    const frame = buffer.slice(0, sep);
-    buffer = buffer.slice(sep + 2); // 留下还没组成完整事件的部分。
-    const parsed = parseFrame(frame);
-    if (parsed) yield parsed;
-    sep = buffer.indexOf("\n\n");
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let sep = buffer.indexOf("\n\n");
+    while (sep !== -1) {
+      const frame = buffer.slice(0, sep);
+      buffer = buffer.slice(sep + 2); // 留下还没组成完整事件的部分。
+      const parsed = parseFrame(frame);
+      if (parsed) yield parsed;
+      sep = buffer.indexOf("\n\n");
+    }
   }
 }
 ```
 
-`stream: true` 让解码器保留尚未完整的字符字节，避免一个汉字的字节跨两次读取时被拆坏。`buffer` 处理的是另一件事：保留尚未完整的事件文本。
+`decoder.decode` 中的 `stream: true` 是**解码器选项**，让它保留尚未完整的字符字节，避免一个汉字跨两次读取时被拆坏。它与上篇请求模型流式返回的同名字段用途不同。`buffer` 则保留尚未组成完整事件的文本。
+
+`parseSse` 拆出的 `frame` 还是一段事件文本。接下来，同一文件中的 `parseFrame` 提取事件名和数据，再把数据解析成对象。下面省略类型声明，保留处理逻辑：
+
+```ts
+function parseFrame(frame) {
+  let event = "message"; // 未指定 event: 时，使用默认的 SSE 事件名。
+  const dataLines = [];
+  for (const line of frame.split("\n")) {
+    if (line.startsWith("event:")) {
+      event = line.slice(6).trim();
+    } else if (line.startsWith("data:")) {
+      dataLines.push(line.slice(5).trimStart()); // 收集每行 data: 后的内容。
+    }
+  }
+  if (dataLines.length === 0) return undefined;
+  try {
+    // 多行数据用换行符拼接，再解析其中的 JSON。
+    return { event, data: JSON.parse(dataLines.join("\n")) };
+  } catch {
+    return undefined; // 当前实现跳过不能解析为 JSON 的内容，见 4.1。
+  }
+}
+```
+
+返回的 `data` 就是核心代码中 `sse.data` 的来源：`parseSse` 用 `yield` 交出 `{ event, data }`，外层 `provider.stream` 再从 `data` 中提取文字和工具参数。返回 `undefined` 时，该事件会被跳过。
+
+其中，`[DONE]` 是 Chat Completions 流式响应的结束标记，服务端以 `data: [DONE]` 的形式发送，表示本次响应已发送完毕；它不代表 Agent 已完成用户的任务。这是接口的约定，不是 SSE 协议本身规定的标记。它不是合法 JSON，因此也会被这段代码跳过；结束标记与格式损坏的处理区别，留到 4.1 展开。
 
 这段源码按 `\n\n` 寻找分隔符，是项目当前的简化实现，不是一份完整的通用 SSE 解析器。例如接入采用 `\r\n` 换行的端点时，需要补充处理并验证。读源码时要分清通用机制和某份实现实际覆盖的范围。
 
-### 2.2 事件里的参数，也可能只有一小段
+**用读取 README 的事件走一遍**
 
-假设一个完整 SSE 事件的 `data` 已经被解析，取到的 `tool_calls` 项如下：
+假设服务返回一个包含 `read` 工具请求片段的 SSE 事件，但接入层分两次才读全。下面使用模拟数据，只保留与解析有关的字段；代码块中的 `\n` 表示实际的换行字符。
+
+**① 第一次读取：先存起来。** 解码后得到：
+
+```text
+data: {"choices":[{"delta":{"tool_calls":[{"index":0,
+```
+
+这段文本写入 `buffer` 后，还找不到 `\n\n`，所以 `sep` 是 `-1`。此时不会调用 `parseFrame`，也不会向外产出事件，继续等待下一次读取。
+
+**② 第二次读取：找到事件的结尾。** 新收到的文本是：
+
+```text
+"id":"t1","function":{"name":"read","arguments":"{\"path\":\"REA"}}]}}]}\n\n
+```
+
+把它追加到 `buffer` 后，就有了完整的 `data:` 行和末尾的空行。`parseSse` 找到 `\n\n`，把它之前的文本取作 `frame`，交给 `parseFrame`；本例没有剩余内容，`buffer` 随之变为空字符串。
+
+**③ 解析事件：得到可读取的对象。** `parseFrame` 去掉 `data:` 前缀，把后面的 JSON 文本放入 `dataLines`，再用 `JSON.parse` 解析。这个事件没有 `event:` 行，因此事件名使用默认值 `message`，返回结果如下：
+
+```json
+{
+  "event": "message",
+  "data": {
+    "choices": [
+      {
+        "delta": {
+          "tool_calls": [
+            {
+              "index": 0,
+              "id": "t1",
+              "function": {
+                "name": "read",
+                "arguments": "{\"path\":\"REA"
+              }
+            }
+          ]
+        }
+      }
+    ]
+  }
+}
+```
+
+`parseSse` 随后通过 `yield` 交出这个对象。核心代码沿着 `sse.data → choices[0] → delta.tool_calls`，就能取到其中的工具请求片段。注意：**完整的是这一个 SSE 事件，工具参数还只有 `{"path":"REA`**，接下来仍要继续收集参数。
+
+### 2.2 把参数片段组装成完整的工具请求
+
+接着上面的解析结果，从 `sse.data.choices[0].delta.tool_calls` 取出其中一项：
 
 ```json
 {
@@ -136,40 +220,50 @@ while (true) {
 同一条模型回复还可能请求读取两个文件，各自的片段交错到达。源码用 `index` 区分本次回复中的不同工具请求，分别累积；`id` 则保留下来，之后用于关联工具结果。下面就是核心代码第 ② 步省略的分支：
 
 ```ts
-let block = toolByIndex.get(tc.index);
-const name = tc.function?.name;
-if (block === undefined) {
-  block = {
-    type: "toolCall",
-    id: String(tc.id ?? `call_${tc.index}`),
-    name: String(name ?? ""),
-    arguments: {}, // 先建内部块；此时尚无完整参数。
-  };
-  toolByIndex.set(tc.index, block);
-  blocks.push(block);
-  toolRawByIndex.set(tc.index, "");
-  yield { type: "tool_call_start", id: block.id, name: block.name };
-} else if (name !== undefined && block.name === "") {
-  block.name = String(name); // 兼容工具名稍后到达的情况。
-}
+// 位于 provider.stream 内，对应核心代码第 ② 步。
+for (const tc of choice?.delta?.tool_calls ?? []) {
+  let block = toolByIndex.get(tc.index);
+  const name = tc.function?.name;
+  if (block === undefined) {
+    block = {
+      type: "toolCall",
+      id: String(tc.id ?? `call_${tc.index}`),
+      name: String(name ?? ""),
+      arguments: {}, // 先建内部块；此时尚无完整参数。
+    };
+    toolByIndex.set(tc.index, block);
+    blocks.push(block);
+    toolRawByIndex.set(tc.index, "");
+    yield { type: "tool_call_start", id: block.id, name: block.name };
+  } else if (name !== undefined && block.name === "") {
+    block.name = String(name); // 兼容工具名稍后到达的情况。
+  }
 
-const fragment = tc.function?.arguments ?? "";
-if (fragment !== "") {
-  toolRawByIndex.set(tc.index, (toolRawByIndex.get(tc.index) ?? "") + fragment);
-  yield { type: "tool_call_delta", id: block.id, jsonDelta: fragment };
+  const fragment = tc.function?.arguments ?? "";
+  if (fragment !== "") {
+    toolRawByIndex.set(tc.index, (toolRawByIndex.get(tc.index) ?? "") + fragment);
+    yield { type: "tool_call_delta", id: block.id, jsonDelta: fragment };
+  }
 }
 ```
 
-`toolByIndex` 和 `blocks` 引用同一个工具块。流结束后，核心代码第 ④ 步更新 `ours.arguments`，最终消息里的这个块也就有了完整参数。
+这段代码做三件事：
+
+1. **找到对应的工具请求。** 按 `tc.index` 查找工具块；第一次收到时创建它，记录 ID 和名称，并准备一个空字符串累积参数。
+2. **累积参数。** 把 `tc.function.arguments` 中的新片段，追加到这个请求已有的字符串后面。不同 `index` 的参数分别保存。
+3. **通知接收进度。** 首次创建时产出 `tool_call_start`，收到参数片段时产出 `tool_call_delta`。这些事件用于通知调用者，还不会执行工具，下一节会解释它们的用途。
+
+`toolByIndex` 保存的对象也被放进了 `blocks`。流结束后，核心代码第 ④ 步解析累积的参数字符串，写入这个对象的 `arguments`，最终消息里的工具块也就得到了解析结果。参数解析失败的情况见 4.3。
 
 源码在缺少 ID 时使用 `call_序号` 兜底；这不等于所有服务都接受这种补法。正常协议数据应保留服务给出的调用 ID，兼容其他端点时还要检查它何时发送 ID。本文演示的首个工具片段带有 ID 和名称。
 
-### 2.3 片段用于显示，完整消息才交给循环
+### 2.3 用内部事件传递接收进度和完整消息
 
-工具片段本身不会触发读取文件。第 01 篇中的 `streamAssistant` 持续接收事件，直到拿到 `message_end`：
+前面的 `yield` 把接收进度和最终结果以事件的形式传给调用者。第 01 篇中的 `streamAssistant` 负责接收这些事件。下面节选自 `src/core/loop.ts` 的这个函数，省略参数准备和用量统计代码：
 
 ```ts
-// 节选 src/core/loop.ts，省略函数签名、用量统计和模型标记。
+// 位于 src/core/loop.ts 的 streamAssistant 函数内。
+// request、provider 和 onEvent 来自省略的参数准备代码。
 for await (const event of provider.stream(request)) {
   if (request.signal?.aborted) return null;
   onEvent?.(event); // 文本与工具片段可以先交给交互层显示。
@@ -181,49 +275,69 @@ if (request.signal?.aborted) return null;
 throw new Error("Provider stream ended without a message_end event");
 ```
 
-`text_delta`、`tool_call_start`、`tool_call_delta` 和 `message_end` 都是 imp 的内部事件名，由模型接入层产出。它们不是所有模型服务都会直接返回的字段。
+`onEvent` 把收到的事件转发给交互层，用于更新显示；遇到 `message_end` 时，`streamAssistant` 取出其中的完整消息，返回给 Agent 循环。
 
-循环拿到完整 `assistant` 后，才把它写入 `history`，筛选工具请求并执行。这样界面可以逐段显示，历史中又不必为每个文本片段增加一条消息。怎样把事件显示在终端里，留到第 06 章。
+这里接收的是 Agent 内部统一的流式事件，本篇涉及以下四种：
+
+| 事件              | 作用                                                         |
+| ----------------- | ------------------------------------------------------------ |
+| `text_delta`      | 传递一段新增文字，可用于更新显示                             |
+| `tool_call_start` | 通知开始接收一个工具请求，携带 ID 和名称；不表示开始执行工具 |
+| `tool_call_delta` | 传递该工具请求的一段参数字符串                               |
+| `message_end`     | 携带组装后的完整消息，供 Agent 循环继续处理                  |
+
+模型接入层把不同服务的响应转换成这些事件，Agent 循环和交互层因此可以按同一套方式处理接收进度。源码把这套事件定义为 `LLMEvent`，见 [`provider/types.ts`](https://github.com/FishInSalt/imp/blob/main/src/provider/types.ts)。
+
+这里要区分**事件**和上篇的**消息**：事件传递接收过程中的变化，消息保存对话内容。`message_end` 把两者接起来——它携带一条完整的 `assistant` 消息。Agent 循环取得这条消息后，再将它写入 `history`，筛选工具请求并执行。
+
+这样，界面可以逐段显示，历史中又不必为每个文字片段增加一条消息。怎样把事件显示在终端里，留到第 06 章。
 
 ## 3. 模拟运行：半截路径怎样变成完整参数
 
-下面从已经拆出的 SSE 事件开始观察，省略网络字节拆分、用量和思考内容。每点一次“下一步”，接收一个预设事件，或执行一次收尾检查。
+下面从已经拆出的 SSE 事件开始观察，省略网络字节拆分、用量和思考内容。每点一次“下一步”，接收一个预设事件，或执行一次收尾检查。代码区保留完整的演示核心流程，并高亮当前步骤涉及的代码；可以在区内滚动查看前后逻辑。
 
 先走“读取 README”，留意两个时刻：参数字符串已经拼完整，以及接入层真正发出 `message_end`。这份实现会继续读取到流结束，再解析参数、检查结束原因，并产出完整消息。
 
 <ProviderStreamDemo />
 
-正常路径中，参数的变化是：
-
-```text
-收到片段 1    {"path":"REA
-收到片段 2    DME.md"}
-累积字符串    {"path":"README.md"}
-收尾解析      { path: "README.md" }
-交给循环      message_end → assistant.blocks 中的一项 toolCall
-```
-
-切到“两次读取交错到达”，会看到两个请求分别累积参数。不能按工具名合并，因为它们都叫 `read`；也不能把所有片段拼进同一个字符串。
+在“两次读取交错到达”的场景中，会看到两个请求分别累积参数。不能按工具名合并，因为它们都叫 `read`；也不能把所有片段拼进同一个字符串。
 
 再看“缺少结束原因”和“用户中断”：界面可能已经显示了片段，但演示不会生成一条完整回复。所有内容均为模拟数据，不连接模型、不读取文件。
 
-## 4. 异常处理：哪些情况不能当作完整回复
+## 4. 异常处理：接收和组装回复时出了问题怎么办
 
-### 4.1 连接结束了，但没有收到结束原因
+### 4.1 响应体读完了，却没有收到结束原因
 
-`finish_reason` 是所选协议里模型停止生成的原因。源码在读流时记录它，收尾时检查 `sawFinish`。没有看到它就结束了流，会抛出截断错误，不产生 `message_end`。
+假设文件路径只收到一半，响应体就读完了。接入层怎样发现这次回复可能被截断？
 
-例如代理或网络连接提前断开，客户端看到“流读完了”，实际却可能少了后半段参数。即使恰巧拼出了合法 JSON，也不能据此认定这次模型回复已经按协议结束。
+Chat Completions 用 `finish_reason` 表示模型停止生成的原因。第二节的核心代码在接收过程中记录它，并在读取结束后检查是否收到过：
 
-这份 SSE 解析器会跳过无法解析为 JSON 的事件内容，其中包括 `[DONE]` 标记。因此这里判断结束的依据是 `finish_reason`，不是看到了 `[DONE]` 就直接交出完整消息。
+```ts
+// 位于 provider.stream，节选记录与检查结束原因的代码。
+// 接收过程中：记录服务返回的结束原因。
+if (choice?.finish_reason !== undefined && choice.finish_reason !== null) {
+  sawFinish = true;
+  stopReason = mapFinishReason(choice.finish_reason);
+}
 
-这个实现也有局限：其他无效 JSON 事件同样会被跳过。`sawFinish` 能发现缺失结束原因的截断，却不能保证此前所有事件都完整有效。若要更严格地接入服务，需要区分已知结束标记和格式损坏，并验证必要字段；不能把当前检查说成完整的协议校验。
+// 响应体读取结束后，且用户没有取消：
+if (!sawFinish) {
+  throw new Error("OpenAI stream ended without finish_reason — response may be truncated");
+}
+```
 
-### 4.2 用户主动中断，与网络故障要分开
+如果代理提前结束了响应，客户端可能读不到后续内容，却没有遇到读取错误。这时，缺少 `finish_reason` 就是异常的线索：接入层抛出错误，不产生 `message_end`。即使已有的参数恰好能解析成 JSON，也不能跳过这个检查。
 
-核心代码在读流过程中、产出完整消息之前都会检查 `request.signal`。用户已取消，就直接结束，不发 `message_end`。
+第 2.1 节的解析器会跳过 `[DONE]`，因此当前实现是在响应体读取结束后检查 `sawFinish`。不过，解析器也会跳过其他无法解析为 JSON 的事件；即使收到了结束原因，前面仍可能丢失过内容。这个检查能发现缺少结束原因的情况，但发现不了所有格式错误。
 
-网络读取被取消时也可能抛出异常。`abortSafe` 用同一个信号区分两种情况：
+### 4.2 接收过程中，用户取消了或读取失败了
+
+回答显示到一半时，用户可能按下取消，网络读取也可能发生错误。这两种情况需要分别处理：
+
+- **用户取消：** 停止接收，不产生 `message_end`，Agent 循环也随之停止。
+- **其他读取错误：** 将错误向上传递，让调用方处理。
+
+第二节的核心代码会在接收过程中、发出 `message_end` 之前检查 `request.signal`。取消操作还可能让正在等待的网络读取抛出异常，因此 `abortSafe` 也要检查同一个信号：
 
 ```ts
 // 节选 shared.ts，省略泛型和参数类型。
@@ -231,19 +345,24 @@ async function* abortSafe(source, signal) {
   try {
     for await (const item of source) yield item;
   } catch (err) {
-    if (signal?.aborted) return; // 用户取消，正常结束事件流。
+    if (signal?.aborted) return; // 已取消，结束事件流。
     throw err; // 其他读取错误继续向上传递。
   }
 }
 ```
 
-随后 `streamAssistant` 检查到中断并返回 `null`，执行循环停止。如果没有中断，读取错误则继续向上传递。这份实现不会在已经收到片段后自动重试整次请求；上篇的重试只发生在取得 HTTP 响应的阶段。
+这样，取消操作就不会被当作普通的读取故障继续抛出。Agent 循环如何响应中断，已在第 01 篇介绍，这里只关注接入层怎样停止接收。
 
-### 4.3 参数收齐了，但不是合法 JSON
+这份实现不会在接收片段的过程中自动重试；上篇的重试只发生在取得 HTTP 响应的阶段。重新请求可能生成不同的回复，不能直接接到已有片段后面。如果要支持中途重试，还需要处理已经累积的内容和界面上显示的进度。
 
-核心代码第 ④ 步使用 `safeParseJson`。它的处理并不是“修好参数”，而是在解析失败时返回一个包含错误说明的对象：
+### 4.3 参数片段拼接后，仍无法解析成 JSON
+
+假设累积的参数是 `{"path":"README.md"`，缺少最后一个右花括号。接入层已经拼接了收到的片段，但 `JSON.parse` 仍会失败。
+
+第二节核心代码的第 ④ 步调用 `safeParseJson`，在解析失败时返回一个包含错误说明的对象：
 
 ```ts
+// 节选 shared.ts，省略参数和返回值类型。
 function safeParseJson(raw) {
   try {
     return JSON.parse(raw);
@@ -256,15 +375,17 @@ function safeParseJson(raw) {
 }
 ```
 
-例如 `{"path":"README.md"` 缺了最后一个右花括号，解析就会失败。若结束原因正常到达，这份实现仍可能把错误对象放进工具请求，发出 `message_end`。之后，循环中的工具参数校验才决定能否执行。
+这个对象会被放入工具请求的 `arguments`。如果也收到了结束原因，且用户没有取消，接入层仍会发出 `message_end`，把消息交给 Agent 循环。
 
-对本例的 `read` 来说，这个错误对象没有必填的 `path`，会被工具参数校验拒绝。不能由此推断任何工具都会拒绝 `_parseError`；它在这里不是一个强制拦截标记。更严格的实现可以显式区分解析失败，并阻止该请求进入执行阶段。
+这里的 `_parseError` 只是错误信息，不会自动阻止工具执行。本例中的 `read` 会因为缺少必填的 `path` 被参数校验拒绝，但其他工具未必会拒绝这个对象。更稳妥的处理是显式识别解析失败，阻止这个工具请求进入执行阶段，并将失败原因交回 Agent 循环。
 
-反过来，JSON 能解析也不代表参数正确。`{"path":123}` 是合法 JSON，却不符合路径应为字符串的要求。JSON 解析和工具参数校验处理的是两件事，后者会在第 03 章展开。
+即使 JSON 解析成功，参数也可能不符合工具要求。例如 `{"path":123}` 是合法 JSON，但路径应该是字符串。这一层工具参数校验会在第 03 章展开。
 
-### 4.4 服务给了结束原因，也不等于任务完成
+### 4.4 达到输出上限，回复仍可能不完整
 
-源码把服务的停止原因转换成内部值：
+还有一种情况：服务正常返回了结束原因，但模型的回答或工具参数只生成了一部分，因为这次生成达到了输出上限。此时，`finish_reason` 的值是 `length`。
+
+接入层通过 `mapFinishReason` 把服务返回的值转换成内部的停止原因：
 
 | 服务返回的 `finish_reason` | 内部 `stopReason` | 表示什么                   |
 | -------------------------- | ----------------- | -------------------------- |
@@ -272,11 +393,11 @@ function safeParseJson(raw) {
 | `stop`                     | `end_turn`        | 这次模型生成正常停止       |
 | `length`                   | `max_tokens`      | 这次生成达到了输出限制     |
 
-`message_end` 表示接入层收集完这次回复，并附上停止原因；它不保证回答完整，更不保证用户任务已经完成。
+这里的 `max_tokens` 是内部停止原因的取值，用来记录“因输出限制而停止”，不是设置输出上限的配置字段。
 
-尤其要区分两个名字相近的上限：这里的 `max_tokens` 限制一次模型生成；第 01 篇的 `maxIterations` 限制一次 Agent 运行接收多少次完整模型回复。
+因此，收到 `message_end` 表示接入层结束了本次组装，并交出消息；内容是否被截断，还要看 `stopReason`，工具参数是否可用还要继续校验。它也不代表 Agent 已完成用户的任务。
 
-当前循环主要根据是否存在工具请求决定继续或结束，没有专门处理 `max_tokens` 的分支。因此这份源码不会自动续写被截短的回答；实际产品若要提示用户或请求继续生成，还需要另行设计，不能把它当作已实现的能力。
+当前 imp 的 Agent 循环没有专门处理 `stopReason: "max_tokens"` 的分支，不会自动续写。要处理这种情况，可以先向用户提示回复被截断；如果需要继续生成，还要设计后续请求，以及新旧内容怎样衔接。
 
 ## 5. 模型请求工具之后，轮到本地执行
 
