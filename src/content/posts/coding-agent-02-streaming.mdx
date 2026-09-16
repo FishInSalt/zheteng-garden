@@ -1,0 +1,287 @@
+---
+author: 折腾怪
+pubDatetime: 2026-09-16T02:42:38Z
+title: "Coding Agent 原理与实践 02（下）：模型接入：流式响应与组装"
+featured: false
+draft: true
+tags:
+  - Coding Agent
+  - imp
+  - Agent 原理
+description: 从一次读取 README 的工具请求出发，逐步观察流式参数怎样拼接、完整回复何时交回循环，以及中断、截断和参数解析失败怎样处理。
+---
+
+import ProviderStreamDemo from "@/components/series/ProviderStreamDemo.astro";
+
+## 1. 工具请求只收到一半，能开始读文件吗
+
+[上篇](/posts/coding-agent-02-model-protocol/)已经把“读取 README.md，告诉我项目怎样启动”这个任务和工具说明发给模型。
+
+模型决定调用读取工具，但回复不一定一次到齐。接入层可能先知道“要调用 read”，过一会儿才收到文件路径的前半段，最后才收到剩余部分。
+
+这时还不能读取文件：半截路径不是完整参数。接入层需要边接收边保存，等这次回复按协议结束，再把完整的工具请求交给执行循环。
+
+文本也会分段到达。不过，文本片段可以先用于显示；工具参数尚未完整时，不能因为界面上已经出现了工具名，就开始执行工具。这一篇看看两种需求怎样在同一次接收中处理。
+
+## 2. 对照源码，看回复怎样组装起来
+
+下面仍以 imp 的 [`openai-completions.ts`](https://github.com/FishInSalt/imp/blob/main/src/provider/openai-completions.ts) 为例。上篇取得 `response` 后，这段逻辑继续读取它的响应体。
+
+先看整体：接收片段 → 累积文本或参数 → 检查结束状态 → 产出完整回复。保留源码主要变量和判断位置，省略类型、思考内容、用量统计和空回复兜底；工具片段的内部处理在 2.2 展开。这里是源码节选，不能单独运行。
+
+```ts
+const blocks = []; // 最终回复的内容块。
+let textBlock = null;
+const toolByIndex = new Map(); // 工具序号 → 工具请求块。
+const toolRawByIndex = new Map(); // 工具序号 → 尚未解析的参数字符串。
+let stopReason = null;
+let sawFinish = false;
+
+// parseSse 从字节流拆出事件；abortSafe 区分中断与故障，见 4.2。
+for await (const sse of abortSafe(parseSse(response.body), request.signal)) {
+  if (request.signal?.aborted) return;
+  const chunk = sse.data;
+  const choice = chunk.choices?.[0];
+
+  // ① 保存文本，同时通知显示层。
+  const content = choice?.delta?.content;
+  if (typeof content === "string" && content !== "") {
+    if (textBlock === null) {
+      textBlock = { type: "text", text: "" };
+      blocks.push(textBlock);
+    }
+    textBlock.text += content;
+    yield { type: "text_delta", text: content };
+  }
+
+  // ② 按工具序号保存请求与参数片段，完整分支见 2.2。
+  for (const tc of choice?.delta?.tool_calls ?? []) {
+    // 省略：维护 toolByIndex、toolRawByIndex，并产出工具片段事件。
+  }
+
+  // ③ 记下服务给出的结束原因，见 4.1、4.4。
+  if (choice?.finish_reason !== undefined && choice.finish_reason !== null) {
+    sawFinish = true;
+    stopReason = mapFinishReason(choice.finish_reason);
+  }
+  // 省略用量统计；有些事件只有用量，没有 choices[0]。
+}
+
+// ④ 流读取结束后，把累积的参数字符串解析成对象，见 4.3。
+for (const [index, raw] of toolRawByIndex) {
+  const ours = toolByIndex.get(index);
+  if (ours !== undefined) {
+    ours.arguments = raw.trim() === "" ? {} : safeParseJson(raw);
+  }
+}
+
+if (request.signal?.aborted) return; // 不把中断的回复交给循环。
+if (!sawFinish) throw new Error("响应缺少结束原因，可能已被截断");
+// 省略未知结束原因的映射兜底和空回复占位。
+yield {
+  type: "message_end",
+  message: { role: "assistant", blocks, usage, stopReason },
+  // usage 由省略的统计代码提供。
+};
+```
+
+这里的 `yield` 是异步生成器逐次产出事件的写法。调用者用 `for await` 依次接收这些事件。它与普通函数只在最后 `return` 一个结果不同：可以先通知“收到一段文字”，最后再通知“完整消息已经组装好”。
+
+### 2.1 网络读到一块数据，不等于收到一个完整事件
+
+响应体最先给我们的是字节。一次读取可能只有半条事件，也可能含有好几条事件，所以不能对每次网络读取直接做 `JSON.parse`。
+
+本例使用 SSE：服务按事件发送文本，以空行分隔事件，`data:` 行携带数据。项目的 [`parseSse`](https://github.com/FishInSalt/imp/blob/main/src/provider/shared.ts) 先把字节解码并暂存，找到完整事件后再解析内容。主要逻辑如下，省略了 `try/finally` 中释放 reader 的部分：
+
+```ts
+const reader = body.getReader();
+const decoder = new TextDecoder();
+let buffer = "";
+
+while (true) {
+  const { done, value } = await reader.read();
+  if (done) break;
+  buffer += decoder.decode(value, { stream: true });
+  let sep = buffer.indexOf("\n\n");
+  while (sep !== -1) {
+    const frame = buffer.slice(0, sep);
+    buffer = buffer.slice(sep + 2); // 留下还没组成完整事件的部分。
+    const parsed = parseFrame(frame);
+    if (parsed) yield parsed;
+    sep = buffer.indexOf("\n\n");
+  }
+}
+```
+
+`stream: true` 让解码器保留尚未完整的字符字节，避免一个汉字的字节跨两次读取时被拆坏。`buffer` 处理的是另一件事：保留尚未完整的事件文本。
+
+这段源码按 `\n\n` 寻找分隔符，是项目当前的简化实现，不是一份完整的通用 SSE 解析器。例如接入采用 `\r\n` 换行的端点时，需要补充处理并验证。读源码时要分清通用机制和某份实现实际覆盖的范围。
+
+### 2.2 事件里的参数，也可能只有一小段
+
+假设一个完整 SSE 事件的 `data` 已经被解析，取到的 `tool_calls` 项如下：
+
+```json
+{
+  "index": 0,
+  "id": "t1",
+  "function": { "name": "read", "arguments": "{\"path\":\"REA" }
+}
+```
+
+外层事件是合法 JSON，但里面的 `arguments` 只是字符串 `{"path":"REA`，还不是完整的参数对象。下一条事件可能继续传来 `DME.md"}`。
+
+因此需要两次不同的解析：先解析事件外层 JSON，取出参数片段；等参数收齐，再解析拼接后的参数 JSON。
+
+同一条模型回复还可能请求读取两个文件，各自的片段交错到达。源码用 `index` 区分本次回复中的不同工具请求，分别累积；`id` 则保留下来，之后用于关联工具结果。下面就是核心代码第 ② 步省略的分支：
+
+```ts
+let block = toolByIndex.get(tc.index);
+const name = tc.function?.name;
+if (block === undefined) {
+  block = {
+    type: "toolCall",
+    id: String(tc.id ?? `call_${tc.index}`),
+    name: String(name ?? ""),
+    arguments: {}, // 先建内部块；此时尚无完整参数。
+  };
+  toolByIndex.set(tc.index, block);
+  blocks.push(block);
+  toolRawByIndex.set(tc.index, "");
+  yield { type: "tool_call_start", id: block.id, name: block.name };
+} else if (name !== undefined && block.name === "") {
+  block.name = String(name); // 兼容工具名稍后到达的情况。
+}
+
+const fragment = tc.function?.arguments ?? "";
+if (fragment !== "") {
+  toolRawByIndex.set(tc.index, (toolRawByIndex.get(tc.index) ?? "") + fragment);
+  yield { type: "tool_call_delta", id: block.id, jsonDelta: fragment };
+}
+```
+
+`toolByIndex` 和 `blocks` 引用同一个工具块。流结束后，核心代码第 ④ 步更新 `ours.arguments`，最终消息里的这个块也就有了完整参数。
+
+源码在缺少 ID 时使用 `call_序号` 兜底；这不等于所有服务都接受这种补法。正常协议数据应保留服务给出的调用 ID，兼容其他端点时还要检查它何时发送 ID。本文演示的首个工具片段带有 ID 和名称。
+
+### 2.3 片段用于显示，完整消息才交给循环
+
+工具片段本身不会触发读取文件。第 01 篇中的 `streamAssistant` 持续接收事件，直到拿到 `message_end`：
+
+```ts
+// 节选 src/core/loop.ts，省略函数签名、用量统计和模型标记。
+for await (const event of provider.stream(request)) {
+  if (request.signal?.aborted) return null;
+  onEvent?.(event); // 文本与工具片段可以先交给交互层显示。
+  if (event.type === "message_end") {
+    return { ...event.message, model: request.model };
+  }
+}
+if (request.signal?.aborted) return null;
+throw new Error("Provider stream ended without a message_end event");
+```
+
+`text_delta`、`tool_call_start`、`tool_call_delta` 和 `message_end` 都是 imp 的内部事件名，由模型接入层产出。它们不是所有模型服务都会直接返回的字段。
+
+循环拿到完整 `assistant` 后，才把它写入 `history`，筛选工具请求并执行。这样界面可以逐段显示，历史中又不必为每个文本片段增加一条消息。怎样把事件显示在终端里，留到第 06 章。
+
+## 3. 模拟运行：半截路径怎样变成完整参数
+
+下面从已经拆出的 SSE 事件开始观察，省略网络字节拆分、用量和思考内容。每点一次“下一步”，接收一个预设事件，或执行一次收尾检查。
+
+先走“读取 README”，留意两个时刻：参数字符串已经拼完整，以及接入层真正发出 `message_end`。这份实现会继续读取到流结束，再解析参数、检查结束原因，并产出完整消息。
+
+<ProviderStreamDemo />
+
+正常路径中，参数的变化是：
+
+```text
+收到片段 1    {"path":"REA
+收到片段 2    DME.md"}
+累积字符串    {"path":"README.md"}
+收尾解析      { path: "README.md" }
+交给循环      message_end → assistant.blocks 中的一项 toolCall
+```
+
+切到“两次读取交错到达”，会看到两个请求分别累积参数。不能按工具名合并，因为它们都叫 `read`；也不能把所有片段拼进同一个字符串。
+
+再看“缺少结束原因”和“用户中断”：界面可能已经显示了片段，但演示不会生成一条完整回复。所有内容均为模拟数据，不连接模型、不读取文件。
+
+## 4. 异常处理：哪些情况不能当作完整回复
+
+### 4.1 连接结束了，但没有收到结束原因
+
+`finish_reason` 是所选协议里模型停止生成的原因。源码在读流时记录它，收尾时检查 `sawFinish`。没有看到它就结束了流，会抛出截断错误，不产生 `message_end`。
+
+例如代理或网络连接提前断开，客户端看到“流读完了”，实际却可能少了后半段参数。即使恰巧拼出了合法 JSON，也不能据此认定这次模型回复已经按协议结束。
+
+这份 SSE 解析器会跳过无法解析为 JSON 的事件内容，其中包括 `[DONE]` 标记。因此这里判断结束的依据是 `finish_reason`，不是看到了 `[DONE]` 就直接交出完整消息。
+
+这个实现也有局限：其他无效 JSON 事件同样会被跳过。`sawFinish` 能发现缺失结束原因的截断，却不能保证此前所有事件都完整有效。若要更严格地接入服务，需要区分已知结束标记和格式损坏，并验证必要字段；不能把当前检查说成完整的协议校验。
+
+### 4.2 用户主动中断，与网络故障要分开
+
+核心代码在读流过程中、产出完整消息之前都会检查 `request.signal`。用户已取消，就直接结束，不发 `message_end`。
+
+网络读取被取消时也可能抛出异常。`abortSafe` 用同一个信号区分两种情况：
+
+```ts
+// 节选 shared.ts，省略泛型和参数类型。
+async function* abortSafe(source, signal) {
+  try {
+    for await (const item of source) yield item;
+  } catch (err) {
+    if (signal?.aborted) return; // 用户取消，正常结束事件流。
+    throw err; // 其他读取错误继续向上传递。
+  }
+}
+```
+
+随后 `streamAssistant` 检查到中断并返回 `null`，执行循环停止。如果没有中断，读取错误则继续向上传递。这份实现不会在已经收到片段后自动重试整次请求；上篇的重试只发生在取得 HTTP 响应的阶段。
+
+### 4.3 参数收齐了，但不是合法 JSON
+
+核心代码第 ④ 步使用 `safeParseJson`。它的处理并不是“修好参数”，而是在解析失败时返回一个包含错误说明的对象：
+
+```ts
+function safeParseJson(raw) {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return {
+      _parseError: "tool arguments were not valid JSON",
+      raw: raw.slice(0, 500),
+    };
+  }
+}
+```
+
+例如 `{"path":"README.md"` 缺了最后一个右花括号，解析就会失败。若结束原因正常到达，这份实现仍可能把错误对象放进工具请求，发出 `message_end`。之后，循环中的工具参数校验才决定能否执行。
+
+对本例的 `read` 来说，这个错误对象没有必填的 `path`，会被工具参数校验拒绝。不能由此推断任何工具都会拒绝 `_parseError`；它在这里不是一个强制拦截标记。更严格的实现可以显式区分解析失败，并阻止该请求进入执行阶段。
+
+反过来，JSON 能解析也不代表参数正确。`{"path":123}` 是合法 JSON，却不符合路径应为字符串的要求。JSON 解析和工具参数校验处理的是两件事，后者会在第 03 章展开。
+
+### 4.4 服务给了结束原因，也不等于任务完成
+
+源码把服务的停止原因转换成内部值：
+
+| 服务返回的 `finish_reason` | 内部 `stopReason` | 表示什么                   |
+| -------------------------- | ----------------- | -------------------------- |
+| `tool_calls`               | `tool_use`        | 这次模型回复提出了工具请求 |
+| `stop`                     | `end_turn`        | 这次模型生成正常停止       |
+| `length`                   | `max_tokens`      | 这次生成达到了输出限制     |
+
+`message_end` 表示接入层收集完这次回复，并附上停止原因；它不保证回答完整，更不保证用户任务已经完成。
+
+尤其要区分两个名字相近的上限：这里的 `max_tokens` 限制一次模型生成；第 01 篇的 `maxIterations` 限制一次 Agent 运行接收多少次完整模型回复。
+
+当前循环主要根据是否存在工具请求决定继续或结束，没有专门处理 `max_tokens` 的分支。因此这份源码不会自动续写被截短的回答；实际产品若要提示用户或请求继续生成，还需要另行设计，不能把它当作已实现的能力。
+
+## 5. 模型请求工具之后，轮到本地执行
+
+至此，上下两篇连起了一次模型通信：把内部消息转换成请求，接收返回的片段，再整理成循环能处理的完整回复。显示可以随片段推进，工具执行则要等完整请求，并继续经过参数与权限检查。
+
+下一章进入工具系统：拿到 `read` 和文件路径后，怎样找到对应实现、检查参数、执行操作，并把成功或失败转换成模型能理解的结果。
+
+流式工具字段可对照 [OpenAI 的函数调用文档](https://developers.openai.com/api/docs/guides/function-calling#streaming)；本文的组装、错误兜底和中断行为以 imp 源码为例。

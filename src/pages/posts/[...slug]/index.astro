@@ -6,6 +6,8 @@ import ArticleToc from "@/components/ArticleToc.astro";
 import PostSidebar from "@/components/PostSidebar.astro";
 import Footer from "@/components/Footer.astro";
 import Datetime from "@/components/Datetime.astro";
+import ArticleStats from "@/components/ArticleStats.astro";
+import type { ArticleStatistics } from "@/utils/remarkArticleStats";
 import Tag from "@/components/Tag.astro";
 import { getPostSlug, getPostUrl } from "@/utils/getPostPaths";
 import { getSortedPosts } from "@/utils/getSortedPosts";
@@ -77,7 +79,7 @@ const {
 
 // Keep the complete frontmatter title for metadata; separate its reading hierarchy.
 const seriesTitle = title.match(
-  /^(Coding Agent 原理与实践)\s+(\d{2,})[：:]\s*(.+)$/u
+  /^(Coding Agent 原理与实践)\s+(\d{2,}(?:（[上下]）)?)[：:]\s*(.+)$/u
 );
 // Keep Chinese words and English words intact when a long title wraps.
 const titleWords = seriesTitle
@@ -90,7 +92,10 @@ const titleWords = seriesTitle
     )
   : null;
 
-const { Content, headings } = await render(post);
+const { Content, headings, remarkPluginFrontmatter } = await render(post);
+const articleStats = remarkPluginFrontmatter.articleStats as
+  ArticleStatistics | undefined;
+if (!articleStats) throw new Error(`Missing article statistics for ${post.id}`);
 
 let ogImageUrl: string | undefined;
 
@@ -159,6 +164,7 @@ const ogImage = ogImageUrl
         <p class="text-muted-foreground mt-3 text-sm" data-pagefind-ignore>
           作者：{post.data.author}
         </p>
+        <ArticleStats stats={articleStats} />
       </header>
       <ArticleToc {headings} />
       <article

@@ -1,0 +1,430 @@
+---
+author: 折腾怪
+pubDatetime: 2026-09-16T02:42:37Z
+title: "Coding Agent 原理与实践 02（上）：模型接入：请求与消息转换"
+featured: false
+draft: true
+tags:
+  - Coding Agent
+  - imp
+  - Agent 原理
+description: 接着读取 README 的任务，看看执行循环里的消息和工具定义，怎样转换成模型服务接收的请求，以及工具结果怎样在下一次调用中传回去。
+---
+
+import ProviderArchitecture from "@/components/series/ProviderArchitecture.astro";
+import ToolResultHandoff from "@/components/series/ToolResultHandoff.astro";
+
+## 1. 同一个读文件任务，换个模型还能继续吗
+
+上一篇里，我们让 Agent 完成这个任务：
+
+> 读取 README.md，告诉我项目怎样启动。
+
+Agent Loop（Agent 循环）把任务交给模型，模型请求读取文件，循环执行工具，再把读取结果交回去。
+
+现在想换一家模型服务。任务没变，读取文件的工具也没变，但对方接收消息的格式可能不同：有的把工具结果当作单独一种消息，有的把它放在用户消息的内容里。如果这些差别都写进执行循环，每增加一种服务，就得重新检查循环中的每个相关分支。
+
+所以，我们在 Agent 循环和模型服务之间加一层适配，源码里用 **provider** 接口来定义这层能力。Agent 循环始终使用统一的消息格式；不同的 provider 实现负责把这些消息转换成对应模型服务要求的请求，再把返回的回复转换成 Agent 内部的格式。它的作用类似操作系统中的虚拟文件系统：上层使用统一接口，底层的不同实现负责处理各自的差异。
+
+把模型接入层放回整个 Agent，可以看到它与循环、外部服务之间的关系：
+
+<ProviderArchitecture />
+
+图中的 **[Chat Completions API](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)** 和 **[Messages API](https://platform.claude.com/docs/en/api/messages/create)** 分别是 OpenAI 与 Anthropic 提供的模型调用接口：我们的代码向接口发送对话消息和工具说明，服务返回模型生成的回复。两者各自规定了请求和回复的数据格式，模型接入层需要按对应的格式收发数据。
+
+一家厂商也可以提供兼容其他厂商 API 的接口。例如，imp 的 [Z.ai 接入](https://github.com/FishInSalt/imp/blob/main/src/provider/zai.ts)复用了 Chat Completions 接入实现，再配置服务地址、密钥与兼容选项。因此，模型厂商和接入协议并不是一一对应的。
+
+Agent Loop 仍然通过同一个 provider 接口获取回复；读取文件等工具的执行也仍由循环调用工具系统完成。
+
+这一章分成上下两篇。上篇先看消息和工具怎样发出去，下篇再看返回的流式数据怎样组成完整回复。
+
+## 2. 对照源码，看一次请求怎样发出去
+
+第 01 篇用 `streamAssistant` 等待一次完整回复。它内部调用 `provider.stream(request)`，实际与模型服务通信的是 provider。
+
+下面节选自 imp 的 [`openai-completions.ts`](https://github.com/FishInSalt/imp/blob/main/src/provider/openai-completions.ts)。它负责对接 **Chat Completions API**。先留意三个动作：转换消息、提取工具说明、发送请求。不必马上记住每个字段。
+
+保留了源码的主要调用和命名，省略类型、用量选项、思考配置与兼容开关；`...` 表示省略的实现。这段代码用于讲解，不能直接复制运行。
+
+```ts
+// 位于 provider 的 async *stream(request) 内。
+// apiKey、baseUrl 在创建 provider 时准备好，不放进对话消息。
+if (!apiKey) {
+  throw new Error(/* 省略凭据缺失提示，见 4.1 */);
+}
+
+// ① 把内部消息转换成服务接收的格式。
+const body = {
+  model: request.model,
+  stream: true,
+  messages: toWireMessages(request.system, request.messages),
+  [maxTokensField(request.model)]: request.maxTokens,
+  // 省略流式用量选项。
+};
+
+// ② 只发送工具说明，不发送本地执行函数。
+if (request.tools.length > 0) {
+  body.tools = request.tools.map(t => ({
+    type: "function",
+    function: {
+      name: t.name,
+      description: t.description,
+      parameters: t.parameters,
+    },
+  }));
+  body.tool_choice = "auto";
+}
+
+// ③ 发送 HTTP 请求；有限重试在这个函数里，见 4.2。
+const response = await postJsonWithRetry(
+  `${baseUrl}/chat/completions`,
+  { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
+  JSON.stringify(body),
+  request.signal,
+  "OpenAI"
+);
+if (response === null) return; // 连接期间被中断，见 4.3。
+if (!response.ok || !response.body) {
+  // 源码会读取错误正文，并给出状态码及提示，见 4.1。
+  throw new Error(/* 省略错误信息拼装 */);
+}
+
+// 后续：读取 response.body，组装回复并产出事件，下篇展开。
+```
+
+`request` 是 Agent 循环交给模型接入层的输入，使用 Agent 内部的统一格式。它包含当前对话的消息 `messages`、系统指令 `system`、可用工具 `tools`，以及模型配置和中断信号。
+
+接入层根据这些信息构造 `body`，也就是**符合模型服务 API 要求的请求体**，再把它序列化为 JSON 发送出去。这就是前面所说的“把内部格式转换成服务要求的格式”。
+
+请求中还有两个与生成方式有关的设置：
+
+- **`stream: true`**：让服务逐步返回生成的内容，接收和组装过程会在下篇展开。
+- **`maxTokens`**：设置本次模型调用的输出 token 数量上限。`maxTokensField` 用来选择该模型支持的参数名。它限制的是一次调用的输出量，第 01 篇的 `maxIterations` 限制的则是 Agent 循环的轮数。
+
+回到读取 README 的任务：这次发出去的是任务和工具说明。模型返回读取文件的工具请求后，才由 Agent 循环调用工具，真正读取文件。
+
+### 2.1 消息为什么还要转换一次
+
+第 01 篇的 `history` 保存三类消息：用户输入、模型回复、工具结果。其中，模型回复里的 `blocks` 可以包含普通文本，也可以包含工具请求。
+
+这些是 Agent 内部使用的结构。模型服务并不知道 `toolResult` 这个内部角色是什么意思，需要接入层转换。
+
+核心代码中的 `toWireMessages` 就做这件事。`wire` 在这里表示准备通过网络发送的格式。先看最简单的用户消息：
+
+```ts
+// 节选 toWireMessages，省略类型和其他消息分支。
+const wire = [{ role: "system", content: system }];
+for (const msg of messages) {
+  switch (msg.role) {
+    case "user":
+      wire.push({ role: "user", content: msg.content });
+      break;
+    // assistant、toolResult 分支见 2.3。
+  }
+}
+return wire;
+```
+
+第一次调用时，内部历史只有“读取 README”这条用户消息。转换后，请求里多了开头的系统指令，用户消息的内容保持不变。
+
+这里把系统指令放进 `role: "system"`，是所选源码的写法，不是所有模型接口的统一规则。这个例子用于解释转换的位置；接入具体模型时，还需要核对它支持的指令角色和请求参数。
+
+### 2.2 把工具定义转换成模型能接收的格式
+
+上一节处理了对话消息，接下来还要告诉模型有哪些工具可以使用。核心代码中的 `request.tools.map(...)` 遍历可用工具，提取名称、用途和参数说明，按 Chat Completions API 的格式放进 `body.tools`：
+
+| 字段          | 在读取 README 的任务里有什么用                         |
+| ------------- | ------------------------------------------------------ |
+| `name`        | 工具的名称 `read`，模型用它指定要调用的工具            |
+| `description` | 告诉模型，这个工具能够读取文本文件                     |
+| `parameters`  | 告诉模型，调用时需要提供文件路径，以及路径应是什么类型 |
+
+`parameters` 用 **JSON Schema** 描述工具需要的参数。可以把它理解为一份参数格式说明：有哪些字段、每个字段是什么类型、哪些必须提供。
+
+下面是转换后 `body.tools` 数组中的一项，以读取文件的 `read` 工具为例。为了方便阅读，只保留文件路径参数，缩短了说明文字，省略了源码中的可选读取范围参数：
+
+```json
+{
+  "type": "function",
+  "function": {
+    "name": "read",
+    "description": "读取文本文件内容",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string", "description": "要读取的文件路径" }
+      },
+      "required": ["path"]
+    }
+  }
+}
+```
+
+这里的 `path` 必须是字符串，`required: ["path"]` 表示调用时必须提供文件路径。模型看到这份说明，就知道可以请求 `read` 工具，并在参数中给出 `README.md` 的路径。
+
+本地工具对象还有一个 `execute` 函数，负责真正读取文件。接入层只提取上面三个字段，执行函数留在本地；收到模型的工具请求后，由 Agent 循环调用工具系统执行。执行前的参数校验会在第 03 章展开。
+
+核心代码中的 `tool_choice: "auto"` 则允许模型根据任务选择是否请求工具，不强制它调用 `read`。
+
+发给模型的这份说明叫作**工具定义**。模型据此提出**工具请求**，本地执行后得到**工具结果**。下一节就看读取 README 后，工具请求和工具结果怎样随对话消息一起发回模型。
+
+### 2.3 工具执行后，怎样把结果交回模型
+
+前面，Agent 已经把“读取 README.md，告诉我项目怎样启动”这个任务和工具定义发给了模型。
+
+假设模型返回了一个工具请求：读取 `README.md`。Agent 循环调用本地工具，读到了“启动命令：npm run dev”。此时，文件内容已经在本地，但还没有交给模型，需要再调用一次模型，让它根据读取结果回答用户。
+
+Agent 循环收到模型回复后，已经把包含工具请求的回复写入 `history`，然后调用工具读取文件。现在工具刚返回结果，接下来要把结果追加到历史，再将更新后的历史交给模型接入层。
+
+这时，历史中会比第一次调用时多出两条消息：模型的工具请求，以及本地工具的执行结果。它们使用的是 Agent 内部格式，下一步要解决的是：怎样把它们放进模型服务接收的请求中？
+
+<ToolResultHandoff />
+
+这两条消息还需要通过**调用 ID** 对应起来。下面假设这次读取请求的 ID 是 `t1`，结果也要关联这个 ID。
+
+接着看 2.1 介绍过的 `toWireMessages`。先处理模型此前返回的、包含读取请求的那条回复，再处理本地工具的执行结果。
+
+在 `assistant` 分支中，它从 `msg.blocks` 分别提取文字和工具请求，再转换成 Chat Completions API 要求的格式。下面省略了 TypeScript 的类型收窄声明：
+
+```ts
+// 位于 toWireMessages 中，按内部消息的 role 选择转换方式。
+switch (msg.role) {
+  case "assistant": {
+    const text = msg.blocks
+      .filter(b => b.type === "text")
+      .map(b => b.text)
+      .join("\n");
+
+    const toolCalls = msg.blocks
+      .filter(b => b.type === "toolCall")
+      .map(b => ({
+        id: b.id, // 保留调用 ID，后面用它匹配结果。
+        type: "function",
+        function: {
+          name: b.name,
+          arguments: JSON.stringify(b.arguments), // 内部对象变成 JSON 字符串。
+        },
+      }));
+
+    wire.push({
+      role: "assistant",
+      content: text === "" && toolCalls.length > 0 ? null : text,
+      ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+    });
+    break;
+  }
+
+  // 其他分支省略，下面继续看 toolResult。
+}
+```
+
+这里保留了工具请求的 ID `t1`。内部参数是 `{ path: "README.md" }`，API 中的 `function.arguments` 则要求使用包含 JSON 的**字符串**，所以需要调用 `JSON.stringify`。接收模型回复时还要做反向转换，下篇会展开。
+
+接下来是同一个函数中的 `toolResult` 分支，负责转换本地工具返回的结果：
+
+```ts
+case "toolResult":
+  for (const r of msg.results) {
+    wire.push({ role: "tool", tool_call_id: r.toolCallId, content: r.content });
+  }
+  break;
+```
+
+内部的一条 `toolResult` 消息可以收集多个工具结果，这里把每个结果转换为一条 `role: "tool"` 消息。`content` 保存读取到的内容，`tool_call_id` 填入对应请求的 ID `t1`，表明“这是刚才那次读取的结果”。转换格式时要保留这个对应关系。
+
+工具请求与结果的完整配对由 Agent 循环保证，模型接入层负责转换已有消息。工具执行被取消时怎样记录未执行结果，见[第 01 篇的中断处理](/posts/coding-agent-01-agent-loop/#43-用户中断时有些工具还没执行)。
+
+如果读取失败，结果的文本也要写清失败原因，例如“README.md 不存在”。内部工具结果还有 `isError` 字段，但本例的 Chat Completions 转换只发送 `content`，没有单独传递这个标记。因此，模型需要从收到的结果文本中了解这次读取失败了。
+
+转换完成后，请求中就同时包含了之前的任务、模型提出的读取请求，以及本地读取的结果。第 3 节会把两次请求完整列出来对照。
+
+如果换成 Messages API，同样的信息会放在不同的位置。例如，imp 的 [`anthropic.ts`](https://github.com/FishInSalt/imp/blob/main/src/provider/anthropic.ts) 把工具结果转换为用户消息里的 `tool_result` 内容块。连同前面讲过的系统指令，可以对照两种 API 的写法：
+
+<div className="overflow-x-auto" tabIndex={0} role="region" aria-label="模型协议字段对照，可横向滚动">
+
+| 要表达的信息     | 本例的 Chat Completions 接入 | 项目中的 Messages API 接入          |
+| ---------------- | ---------------------------- | ----------------------------------- |
+| 系统指令         | `messages` 开头的系统消息    | 请求体单独的 `system` 字段          |
+| 模型请求工具     | `assistant.tool_calls`       | `assistant.content` 中的 `tool_use` |
+| 本地执行结果     | `role: "tool"` 消息          | `user.content` 中的 `tool_result`   |
+| 结果对应哪次调用 | `tool_call_id`               | `tool_use_id`                       |
+
+</div>
+
+这里的 `role: "user"` 是 Messages API 包装工具结果的方式，不表示用户又输入了一句话。这些格式差异由模型接入层处理，Agent 循环继续使用内部的统一消息格式。
+
+本篇只讨论文本和本地工具调用；其他内容可能还有服务特有的回传要求，不能据此认为所有模型的历史都能直接互换。
+
+## 3. 模拟运行：对照两次发出的请求
+
+下面继续用同一个任务，模拟两次请求。只观察 `messages` 的变化；模型配置和工具定义在两次请求中都要按需提供，不在这里重复。
+
+**第一次：模型还没看到 README。**
+
+```json
+[
+  { "role": "system", "content": "根据项目文件回答用户的问题。" },
+  { "role": "user", "content": "读取 README.md，告诉我项目怎样启动。" }
+]
+```
+
+此时发送出去的有任务和工具说明，没有 README 的内容。
+
+接着假设发生了这三个动作：
+
+1. 模型请求 `read`，参数为 `README.md`，调用 ID 为 `t1`。
+2. 执行循环调用本地工具，得到“启动命令：npm run dev”。
+3. 循环把模型请求和工具结果依次加入 `history`，再次调用模型接入层。
+
+**第二次：把请求和读取结果一起传回去。**
+
+```json
+[
+  { "role": "system", "content": "根据项目文件回答用户的问题。" },
+  { "role": "user", "content": "读取 README.md，告诉我项目怎样启动。" },
+  {
+    "role": "assistant",
+    "content": null,
+    "tool_calls": [
+      {
+        "id": "t1",
+        "type": "function",
+        "function": { "name": "read", "arguments": "{\"path\":\"README.md\"}" }
+      }
+    ]
+  },
+  { "role": "tool", "tool_call_id": "t1", "content": "启动命令：npm run dev" }
+]
+```
+
+顺着这份请求读下来，就是“用户要什么 → 模型要读哪个文件 → 文件里写了什么”。模型有了这些信息，才能接着回答。示例中的系统指令、ID 和文件内容都是教学数据，并非真实运行日志。
+
+这份实现每次都从当前历史生成请求。模型接入层负责转换已有信息；历史过长时保留哪些消息、何时摘要，属于第 04 章的上下文管理。
+
+## 4. 异常处理：模型请求失败或被取消时怎么办
+
+前面的例子假设请求能被服务接受。实际运行时，配置可能写错，连接可能失败，用户也可能在等待期间取消任务。需要根据原因决定：直接报错、稍后重试，还是结束本次运行。
+
+下面继续节选模型接入层的源码，补充中文注释；各片段会标明所在函数和省略的部分。
+
+### 4.1 API 密钥、服务地址或请求格式有误
+
+请求可能在不同的位置出错，可以分成几种情况排查：
+
+- **没有配置 API 密钥**：发送前就能发现，接入层直接报错。
+- **密钥无效或认证失败**：服务返回错误响应，需要检查认证配置。
+- **服务地址或模型名称有误**：检查请求地址、模型标识，以及服务返回的具体错误说明。
+- **请求参数或消息格式不合法**：检查消息转换，例如工具参数是否正确序列化、工具结果是否关联到对应的调用 ID。
+
+下面对应第 2 节核心代码中的两处检查，位于 [`openai-completions.ts`](https://github.com/FishInSalt/imp/blob/main/src/provider/openai-completions.ts) 的 `provider.stream` 内。密钥缺失时的提示已缩短，省略请求构造和发送代码：
+
+```ts
+// 发送前：检查是否配置了 API 密钥。
+if (!apiKey) {
+  throw new Error("缺少 API 密钥");
+}
+
+// ……构造并发送请求，取得 response，见第 2 节。
+if (response === null) return; // 用户取消，见 4.3。
+
+// 发送后：检查服务是否接受请求，以及是否有可读取的响应体。
+if (!response.ok || !response.body) {
+  const text = await response.text().catch(() => "");
+  const hint =
+    response.status === 401
+      ? " — check OPENAI_API_KEY"
+      : response.status === 404
+        ? " — check the model id and OPENAI_BASE_URL"
+        : "";
+
+  // 保留状态码，并截取最多 500 个字符的错误说明。
+  throw new Error(
+    `OpenAI API error ${response.status}${hint}: ${text.slice(0, 500)}`
+  );
+}
+```
+
+代码中的 `401`、`404` 提示只是排查线索，不能仅凭状态码确定原因，还要结合错误正文。配置或请求内容有误时，通常需要先修正问题，再重新发送。
+
+接入层抛出的异常表示这次模型调用失败，向用户显示错误则由发起任务的交互层负责。接入服务前也要确认它支持哪种 API；仅替换地址，不能让一份 Chat Completions 请求自动变成 Messages 请求。
+
+### 4.2 连接暂时失败或服务限流，怎样重试
+
+如果连接暂时失败，或者服务因为请求过多而返回 `429`，稍等后再发一次可能成功。这类情况由 [`shared.ts`](https://github.com/FishInSalt/imp/blob/main/src/provider/shared.ts) 中的 `postJsonWithRetry` 处理。
+
+本例对连接错误，以及 `429`、`500`、`502`、`503`、`504` 这些状态码进行重试。首次尝试失败后，最多额外重试两次，分别等待 600 毫秒和 1500 毫秒。这些是本例的选择，不是所有模型服务的固定规则。
+
+下面保留重试循环、退出条件和最终失败处理，省略函数签名。`url`、`headers`、`body`、`signal` 和 `label` 都是这个函数的参数：
+
+```ts
+const RETRY_DELAYS_MS = [600, 1500];
+const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
+
+let networkError: Error | null = null;
+for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
+  // 第一次立即发送；后面的两次按顺序等待。
+  if (attempt > 0) await delay(RETRY_DELAYS_MS[attempt - 1] ?? 0, signal);
+
+  try {
+    const r = await fetch(url, { method: "POST", headers, body, signal });
+    if (!RETRYABLE_STATUS.has(r.status) || attempt === RETRY_DELAYS_MS.length) {
+      return r; // 无需重试，或已用完次数，把响应交回 provider 检查。
+    }
+    await r.text().catch(() => ""); // 消费错误响应体，再进入下一轮。
+  } catch (err) {
+    if (signal?.aborted) return null; // 用户取消不按连接故障重试，见 4.3。
+    networkError = err instanceof Error ? err : new Error(String(err));
+  }
+}
+
+// 最后一次尝试仍抛出连接异常，报告失败。
+throw new Error(
+  `${label} request failed: ${networkError?.message ?? "retries exhausted"}`
+);
+```
+
+`return r` 不代表请求一定成功：密钥无效等不在重试范围内的响应，以及重试次数用尽后的错误响应，也会走这里。它们回到 provider 后，再由 4.1 的 `response.ok` 检查报告错误。
+
+**这是一种简化的重试策略，还不能当作生产环境的最佳实践。** 实际接入时，通常还需要考虑：
+
+- **先判断重试有没有用。** 结合服务文档和错误内容，只重试可能恢复的故障。密钥、参数错误应直接报告；额度耗尽也通常无法靠短暂等待解决。
+- **按服务端提示等待。** 如果响应带有有效的 `Retry-After`，应按它指定的时间等待。例如，Anthropic 的限流响应会用这个响应头说明多久后再试；过早重试仍会失败。参见[限流文档](https://platform.claude.com/docs/en/api/rate-limits)。
+- **没有等待提示时，采用有上限的指数退避和随机抖动。** 连续失败后逐步拉长等待间隔，并在一定范围内随机选择等待时间，避免多个客户端同时重试、再次压垮服务。参见 [AWS 的说明](https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/)。
+- **限制次数，也限制总耗时。** 为单次请求设置超时，并限制整轮重试的总耗时；服务端要求的等待时间超出预算时，直接报告失败。等待和请求期间都应允许用户取消。
+
+这里的重试覆盖取得 HTTP 响应前的连接错误，以及上面列出的 HTTP 错误响应。**开始读取正常的流式回复后，如果中途断开，这个函数不会自动重新请求。** 此时可能已经向用户显示了一部分文字，重新生成的内容又可能不同，需要另行处理，下篇会展开。
+
+客户端没收到响应，也不代表服务端没有处理过请求，因此重试仍可能产生重复处理和额外用量。
+
+### 4.3 等待响应或重试时，用户取消了任务
+
+请求还在等待响应，或者正在等待下一次重试时，用户可能取消任务。`request.signal` 就是把“用户已取消”这个状态传给模型接入层的中断信号。
+
+它会传给 `postJsonWithRetry`，成为函数内的 `signal` 参数。4.2 的代码把同一个信号交给 `fetch` 和 `delay`：取消可以中止网络请求，也可以结束重试前的等待。`delay` 内部监听中断并清除计时器，这里不展开计时器代码。
+
+下面抽出两个位置的取消处理：先看 `postJsonWithRetry` 的异常分支，再看 `provider.stream` 如何处理它的返回值。
+
+```ts
+// shared.ts：postJsonWithRetry 内，省略重试循环和响应判断。
+try {
+  const r = await fetch(url, { method: "POST", headers, body, signal });
+  // ……响应判断和重试条件见 4.2。
+} catch (err) {
+  if (signal?.aborted) return null; // 取消：结束调用，不继续重试。
+  networkError = err instanceof Error ? err : new Error(String(err));
+}
+
+// openai-completions.ts：provider.stream 内，发送请求后的检查。
+// response 是 postJsonWithRetry 的返回值。
+if (response === null) return; // 结束输出，不产生完整的模型回复。
+```
+
+这里的 `null` 表示“调用被取消，没有取得完整回复”。第 01 篇的 `streamAssistant` 会检查同一个中断信号并返回 `null`，Agent 循环据此以 `aborted` 结束，从而把用户主动取消与普通请求失败区分开。
+
+## 5. 请求发出之后，还差另一半
+
+模型接入层把同一段历史转换成服务能接收的格式：用户任务、模型的工具请求、工具结果各有对应位置，工具定义则单独说明可以调用什么。
+
+请求被接受后，返回的内容往往会分批到达。下一篇[「模型接入：流式响应与组装」](/posts/coding-agent-02-streaming/)继续看：半截工具参数该存在哪里，什么时候才算拿到一条可以交给执行循环的完整回复。
+
+协议字段可对照 [OpenAI 的函数调用文档](https://developers.openai.com/api/docs/guides/function-calling)；本文的转换和错误处理以链接的 imp 源码为例。

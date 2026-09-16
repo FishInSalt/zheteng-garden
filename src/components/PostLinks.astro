@@ -112,7 +112,9 @@ const others = posts.filter(p => !chapterIds.has(p.id));
   }
   .chapter-number {
     font-variant-numeric: tabular-nums;
-    flex: 0 0 1.35rem;
+    flex: 0 0 auto;
+    min-width: 1.35rem;
+    white-space: nowrap;
   }
   .planned {
     color: var(--muted-foreground);

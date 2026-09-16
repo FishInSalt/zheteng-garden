@@ -13,10 +13,16 @@ export const codingAgentChapters = [
     postId: "coding-agent-01-agent-loop",
   },
   {
-    number: "02",
-    title: "模型接入与消息协议",
-    question: "怎样统一消息、工具请求和流式响应？",
+    number: "02 上",
+    title: "模型接入：请求与消息转换",
+    question: "怎样把消息、工具说明和执行结果发给模型？",
     postId: "coding-agent-02-model-protocol",
+  },
+  {
+    number: "02 下",
+    title: "模型接入：流式响应与组装",
+    question: "怎样把响应片段组装成循环可用的完整回复？",
+    postId: "coding-agent-02-streaming",
   },
   {
     number: "03",

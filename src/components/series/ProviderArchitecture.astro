@@ -1,0 +1,250 @@
+---
+import "./series-visual.css";
+---
+
+<figure class="provider-map series-visual not-prose">
+  <div class="harness">
+    <p class="boundary">Coding Agent 的 harness 层 <span>局部展开</span></p>
+    <div class="loop box">
+      <strong>Agent Loop <span>Agent 循环</span></strong>
+      <p>维护消息历史 · 调用工具 · 决定继续或停止</p>
+    </div>
+    <div class="exchange">
+      <span>↓ 任务、历史、工具说明</span>
+      <span>↑ 统一事件与完整回复</span>
+    </div>
+    <div class="provider">
+      <div class="provider-title">
+        <strong>模型接入</strong><span>provider</span>
+      </div>
+      <p class="configuration">
+        按配置选择接入实现，准备服务地址、密钥和模型名称。
+      </p>
+      <div class="lanes">
+        <div class="lane">
+          <div class="function box">
+            <span class="chapter">02 上 · 请求</span>
+            <strong>请求转换</strong>
+            <p>把消息、工具定义转换成服务接收的格式。</p>
+          </div>
+          <div class="direction">↓ 请求正文</div>
+        </div>
+        <div class="lane response">
+          <div class="function box">
+            <span class="chapter">02 下 · 响应</span>
+            <strong>流式解析与回复组装</strong>
+            <p>解析返回片段，拼接文字和工具请求，产出统一事件。</p>
+          </div>
+          <div class="direction">↑ 响应数据流</div>
+        </div>
+      </div>
+      <div class="transport box">
+        <strong>HTTP 通信</strong>
+        <p>携带凭据发送请求、接收响应；处理连接错误、有限重试与中断。</p>
+      </div>
+    </div>
+  </div>
+  <div class="exchange remote-exchange">
+    <span>↓ HTTP 请求</span><span>↑ 流式响应</span>
+  </div>
+  <div class="external">
+    <p class="boundary">外部模型服务 <span>每次调用使用所选服务</span></p>
+    <div class="services">
+      <div class="service box">
+        <strong>OpenAI</strong><span>Chat Completions API</span>
+      </div>
+      <div class="service box">
+        <strong>Anthropic</strong><span>Messages API</span>
+      </div>
+      <div class="service box">
+        <strong>Z.ai</strong><span>复用 Chat Completions 接入</span>
+      </div>
+    </div>
+  </div>
+  <figcaption>
+    图中按职责划分接入层内部功能，不代表一项功能对应一个文件。服务下方标的是本文涉及的接入路径，并非厂商支持的全部协议。
+  </figcaption>
+</figure>
+
+<style>
+  .provider-map {
+    container-type: inline-size;
+    margin: 1.75rem 0;
+    color: var(--series-ink);
+    font-size: 0.85rem;
+    line-height: 1.6;
+  }
+  .provider-map p {
+    margin: 0;
+  }
+  .harness {
+    padding: 1rem;
+    border: 1px solid var(--series-secondary);
+    border-radius: 0.6rem;
+    background: var(--series-canvas);
+  }
+  .boundary {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.25rem 0.7rem;
+    font-weight: 600;
+    font-size: 0.8rem;
+  }
+  .boundary span {
+    color: var(--series-secondary);
+    font-weight: 400;
+    font-size: 0.75rem;
+  }
+  .box {
+    min-width: 0;
+    padding: 0.8rem;
+    border: 1px solid var(--series-secondary);
+    border-radius: 0.4rem;
+    background: var(--series-paper);
+  }
+  .box strong {
+    display: block;
+    font-size: 0.95rem;
+  }
+  .box p {
+    margin-top: 0.3rem;
+    color: var(--series-secondary);
+    font-size: 0.8rem;
+  }
+  .loop {
+    margin-top: 0.8rem;
+    text-align: center;
+  }
+  .loop strong span {
+    display: inline-block;
+    margin-left: 0.5rem;
+    color: var(--series-secondary);
+    font-size: 0.8rem;
+    font-weight: 400;
+  }
+  .exchange {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 0.6rem;
+    padding: 0.75rem 0;
+    text-align: center;
+    color: var(--series-blue);
+    font-size: 0.8rem;
+  }
+  .exchange span:last-child {
+    color: var(--series-feedback);
+  }
+  .provider {
+    padding: 0.9rem;
+    border: 2px solid var(--series-blue);
+    border-radius: 0.5rem;
+    background: var(--series-blue-wash);
+  }
+  .provider-title {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+  }
+  .provider-title strong {
+    font-size: 1rem;
+  }
+  .provider-title span {
+    color: var(--series-blue);
+  }
+  .provider-map .configuration {
+    margin: 0.35rem 0 0.9rem;
+    color: var(--series-secondary);
+    font-size: 0.8rem;
+  }
+  .lanes {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 0.75rem;
+  }
+  .lane {
+    display: flex;
+    flex-direction: column;
+  }
+  .function {
+    flex: 1;
+    border-color: var(--series-blue);
+  }
+  .chapter {
+    display: block;
+    margin-bottom: 0.4rem;
+    color: var(--series-blue);
+    font-size: 0.75rem;
+  }
+  .direction {
+    padding: 0.5rem 0;
+    color: var(--series-blue);
+    text-align: center;
+    font-size: 0.8rem;
+  }
+  .response .function {
+    border-color: var(--series-feedback);
+  }
+  .response .chapter,
+  .response .direction {
+    color: var(--series-feedback);
+  }
+  .transport {
+    text-align: center;
+  }
+  .external {
+    padding: 1rem;
+    border: 1px dashed var(--series-feedback);
+    border-radius: 0.6rem;
+  }
+  .services {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.65rem;
+    margin-top: 0.8rem;
+  }
+  .service {
+    text-align: center;
+    border-color: var(--series-feedback);
+  }
+  .service span {
+    display: block;
+    margin-top: 0.3rem;
+    color: var(--series-secondary);
+    font-size: 0.75rem;
+    overflow-wrap: anywhere;
+  }
+  .provider-map figcaption {
+    margin-top: 0.65rem;
+    color: var(--series-secondary);
+    font-size: 0.8rem;
+  }
+  @container (max-width: 460px) {
+    .harness,
+    .external {
+      padding: 0.75rem;
+    }
+    .provider {
+      padding: 0.65rem;
+    }
+    .lanes {
+      gap: 0.5rem;
+    }
+    .function {
+      padding: 0.6rem;
+    }
+    .services {
+      grid-template-columns: 1fr;
+    }
+    .service {
+      display: flex;
+      align-items: baseline;
+      flex-wrap: wrap;
+      gap: 0.25rem 0.75rem;
+      text-align: left;
+    }
+    .service span {
+      margin: 0;
+    }
+  }
+</style>

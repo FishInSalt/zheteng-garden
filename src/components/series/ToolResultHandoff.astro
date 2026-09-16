@@ -1,0 +1,261 @@
+---
+import "./series-visual.css";
+---
+
+<figure class="handoff series-visual not-prose">
+  <div class="current stage">
+    <div class="stage-title">
+      <strong>当前：工具刚执行完</strong><span>结果还没有写入历史</span>
+    </div>
+    <div class="current-state">
+      <div class="history-before card">
+        <strong>history 里已有</strong>
+        <ol>
+          <li>用户任务：读取 README，说明启动方式</li>
+          <li>模型回复：请求读取 README.md</li>
+        </ol>
+      </div>
+      <div class="tool-output card">
+        <strong>工具刚返回</strong>
+        <p>启动命令：npm run dev</p>
+        <small>这是本地工具读取到的内容。</small>
+      </div>
+    </div>
+  </div>
+  <div class="connection">
+    <span aria-hidden="true">↓</span> Agent 循环把工具结果追加到 history
+  </div>
+  <div class="history-after stage">
+    <div class="stage-title">
+      <strong>更新后的 history</strong><span>仍是 Agent 内部的消息格式</span>
+    </div>
+    <ol class="messages">
+      <li class="existing">
+        <span class="number">1</span><div>
+          <strong>用户任务</strong><span
+            >读取 README，告诉我项目怎样启动。</span>
+        </div>
+      </li>
+      <li class="request">
+        <span class="number">2</span><div>
+          <strong>模型的工具请求</strong><span
+            >要求读取 README.md，已在执行工具前写入。</span>
+        </div><small>新增消息</small>
+      </li>
+      <li class="result">
+        <span class="number">3</span><div>
+          <strong>工具结果</strong><span>启动命令：npm run dev</span>
+        </div><small>刚刚追加</small>
+      </li>
+    </ol>
+  </div>
+  <div class="connection">
+    <span aria-hidden="true">↓</span> 把更新后的历史交给模型接入层
+  </div>
+  <div class="next stage">
+    <div class="stage-title">
+      <strong>接下来：怎样放进模型服务的请求？</strong>
+    </div>
+    <p>用户消息的转换已在 2.1 讲过。现在需要处理新增的两条消息：</p>
+    <ul>
+      <li>模型提出的<strong>工具请求</strong>，在 API 中怎样表示？</li>
+      <li>本地返回的<strong>工具结果</strong>，该放在请求的什么位置？</li>
+    </ul>
+    <div class="destination">
+      <span aria-hidden="true">↓</span><strong>构造模型服务接收的请求</strong
+      ><span>让模型同时看到任务、工具请求和读取结果。</span>
+    </div>
+  </div>
+  <figcaption>
+    “新增”指相对第一次模型调用，多出的工具请求和工具结果。下面继续看模型接入层怎样转换这两条消息。
+  </figcaption>
+</figure>
+
+<style>
+  .handoff {
+    container-type: inline-size;
+    margin: 1.75rem 0;
+    color: var(--series-ink);
+    font-size: 0.85rem;
+    line-height: 1.6;
+  }
+  .stage {
+    border: 1px solid var(--series-secondary);
+    border-radius: 0.5rem;
+    padding: 0.9rem;
+    background: var(--series-canvas);
+  }
+  .stage-title {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.2rem 0.7rem;
+    margin-bottom: 0.75rem;
+  }
+  .stage-title strong {
+    font-size: 0.95rem;
+  }
+  .stage-title span {
+    font-size: 0.75rem;
+    color: var(--series-secondary);
+  }
+  .current-state {
+    display: grid;
+    grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
+    gap: 0.7rem;
+  }
+  .card {
+    min-width: 0;
+    padding: 0.75rem;
+    border: 1px solid var(--series-rule);
+    border-radius: 0.35rem;
+    background: var(--series-paper);
+  }
+  .card strong {
+    font-size: 0.85rem;
+  }
+  .card p {
+    margin: 0.4rem 0;
+  }
+  .card small {
+    color: var(--series-secondary);
+    font-size: 0.75rem;
+  }
+  .history-before ol {
+    margin: 0.4rem 0 0;
+    padding-left: 1.2rem;
+    font-size: 0.8rem;
+  }
+  .history-before li + li {
+    margin-top: 0.3rem;
+  }
+  .tool-output {
+    border-color: var(--series-feedback);
+  }
+  .tool-output > strong {
+    color: var(--series-feedback);
+  }
+  .connection {
+    padding: 0.65rem 0.25rem;
+    text-align: center;
+    font-size: 0.8rem;
+    color: var(--series-secondary);
+  }
+  .connection > span {
+    color: var(--series-blue);
+    margin-right: 0.3rem;
+  }
+  .handoff .messages {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+  .messages li {
+    display: flex;
+    align-items: baseline;
+    gap: 0.6rem;
+    padding: 0.6rem 0.7rem;
+    border: 1px solid var(--series-rule);
+    background: var(--series-paper);
+    border-radius: 0.35rem;
+  }
+  .messages li + li {
+    margin-top: 0.5rem;
+  }
+  .messages .number {
+    font-size: 0.8rem;
+    color: var(--series-secondary);
+  }
+  .messages li > div {
+    flex: 1;
+    min-width: 0;
+  }
+  .messages strong,
+  .messages li > div > span {
+    display: block;
+  }
+  .messages li > div > span {
+    margin-top: 0.15rem;
+    font-size: 0.8rem;
+    color: var(--series-secondary);
+  }
+  .messages small {
+    font-size: 0.75rem;
+    white-space: nowrap;
+  }
+  .messages .existing {
+    background: transparent;
+    border-style: dashed;
+    color: var(--series-secondary);
+  }
+  .messages .existing strong {
+    font-weight: 500;
+  }
+  .messages .request {
+    border-color: var(--series-blue);
+  }
+  .request small {
+    color: var(--series-blue);
+  }
+  .messages .result {
+    border-color: var(--series-feedback);
+  }
+  .result small {
+    color: var(--series-feedback);
+  }
+  .next {
+    border-color: var(--series-blue);
+    background: var(--series-blue-wash);
+  }
+  .next .stage-title {
+    margin-bottom: 0.4rem;
+  }
+  .next p {
+    margin: 0;
+    font-size: 0.8rem;
+  }
+  .next ul {
+    margin: 0.6rem 0;
+    padding-left: 1.2rem;
+  }
+  .next li + li {
+    margin-top: 0.3rem;
+  }
+  .destination {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.2rem;
+    margin-top: 0.8rem;
+    padding-top: 0.6rem;
+    border-top: 1px solid var(--series-blue);
+    text-align: center;
+  }
+  .destination > span {
+    font-size: 0.8rem;
+    color: var(--series-secondary);
+  }
+  .handoff figcaption {
+    margin-top: 0.7rem;
+    font-size: 0.8rem;
+    color: var(--series-secondary);
+  }
+  @container (max-width: 480px) {
+    .stage {
+      padding: 0.75rem;
+    }
+    .current-state {
+      grid-template-columns: 1fr;
+    }
+    .messages li {
+      flex-wrap: wrap;
+      gap: 0.2rem 0.5rem;
+    }
+    .messages li > div {
+      flex-basis: calc(100% - 1.5rem);
+    }
+    .messages small {
+      margin-left: 1rem;
+    }
+  }
+</style>
