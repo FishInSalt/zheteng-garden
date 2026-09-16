@@ -36,9 +36,9 @@ pnpm preview --host 127.0.0.1 --port 4321
 
 首篇技术博客：`src/content/posts/building-zheteng-garden.md`。
 
-Coding Agent 系列记录 imp 的开发过程，按核心模块解释原理与伪代码实现，面向有使用经验的读者。章节按理解依赖排列，章内记录实际开发演进。选题、各章展示清单与写作约定见 [系列规划](docs/coding-agent-series.md)，开篇文章为 `src/content/posts/coding-agent-00-under-the-hood.mdx`。
+Coding Agent 系列面向有使用经验、想理解原理的读者，按核心模块解释实现思路，以 imp 源码作为实例。章节按理解依赖排列，通过小场景、带注释的源码、模拟运行和异常处理展开。选题、各章展示清单与写作约定见 [系列规划](docs/coding-agent-series.md)，开篇文章为 `src/content/posts/coding-agent-00-under-the-hood.mdx`。
 
-系列使用 MDX 引用 `src/components/series/` 中的静态图示组件，章节与里程碑数据位于 `src/data/coding-agent-series.ts`。图示采用局部明暗配色与手机布局。目录只链接已发布文章，未发布章节显示为计划。00 已设为正式文章，可通过本地开发或构建预览阅读。后续草稿在开发模式也会过滤，可用临时副本预览，详见系列规划。
+系列使用 MDX 引用 `src/components/series/` 中的图示与交互演示，章节目录位于 `src/data/coding-agent-series.ts`。文章页采用左侧文章列表、中间正文、右侧目录的布局，适配明暗主题与手机。00、01 已设为正式文章；01 提供四种执行循环的逐步演示，不调用在线模型或执行命令。目录只链接已发布文章，未发布章节显示为计划。后续草稿在开发模式也会过滤，可用临时副本预览，详见系列规划。
 
 ## 改配置
 

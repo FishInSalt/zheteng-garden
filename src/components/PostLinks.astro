@@ -1,0 +1,125 @@
+---
+import { getCollection } from "astro:content";
+import { getSortedPosts } from "@/utils/getSortedPosts";
+import { getPostUrl } from "@/utils/getPostPaths";
+import { codingAgentChapters } from "@/data/coding-agent-series";
+interface Props {
+  current: string;
+}
+const { current } = Astro.props;
+const posts = getSortedPosts(await getCollection("posts"));
+const chapterIds = new Set<string>(codingAgentChapters.map(c => c.postId));
+const others = posts.filter(p => !chapterIds.has(p.id));
+---
+
+<nav aria-label="文章列表">
+  <h2>文章列表</h2>
+  <h3>Coding Agent 原理与实践</h3>
+  <ol>
+    {
+      codingAgentChapters.map(chapter => {
+        const post = posts.find(p => p.id === chapter.postId);
+        return (
+          <li>
+            {post ? (
+              <a
+                href={getPostUrl(post.id, post.filePath)}
+                aria-current={current === post.id ? "page" : undefined}
+              >
+                <span class="chapter-number">{chapter.number}</span>
+                <span>{chapter.title}</span>
+              </a>
+            ) : (
+              <span class="planned">
+                <span class="chapter-number">{chapter.number}</span>
+                <span>
+                  {chapter.title}
+                  <small>计划</small>
+                </span>
+              </span>
+            )}
+          </li>
+        );
+      })
+    }
+  </ol>
+  {
+    others.length > 0 && (
+      <>
+        <>
+          <h3>其他文章</h3>
+          <ul>
+            {others.map(post => (
+              <li>
+                <a
+                  href={getPostUrl(post.id, post.filePath)}
+                  aria-current={current === post.id ? "page" : undefined}
+                >
+                  {post.data.title}
+                </a>
+              </li>
+            ))}
+          </ul>
+        </>
+      </>
+    )
+  }
+</nav>
+<style>
+  h2 {
+    margin: 0 0 1.5rem;
+    font-size: 0.95rem;
+    font-weight: 650;
+  }
+  h3 {
+    margin: 1.75rem 0.7rem 0.65rem;
+    font-size: 0.85rem;
+    font-weight: 650;
+  }
+  h3:first-of-type {
+    margin-top: 0;
+  }
+  ol,
+  ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  li {
+    margin: 0.15rem 0;
+  }
+  a,
+  .planned {
+    display: flex;
+    gap: 0.65rem;
+    padding: 0.6rem 0.75rem;
+    border-radius: 0.45rem;
+    font-size: 0.875rem;
+    line-height: 1.5;
+  }
+  a {
+    color: var(--muted-foreground);
+    text-decoration: none;
+  }
+  a:hover {
+    background: var(--muted);
+    color: var(--foreground);
+  }
+  a[aria-current="page"] {
+    background: var(--muted);
+    color: var(--accent);
+    font-weight: 600;
+  }
+  .chapter-number {
+    font-variant-numeric: tabular-nums;
+    flex: 0 0 1.35rem;
+  }
+  .planned {
+    color: var(--muted-foreground);
+  }
+  small {
+    font-size: 0.65rem;
+    margin-left: 0.45rem;
+    color: var(--muted-foreground);
+  }
+</style>

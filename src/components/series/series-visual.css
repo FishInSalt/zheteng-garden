@@ -1,12 +1,12 @@
-/* Local to series figures: no changes to the blog's global reading theme. */
+/* Series figures share the warm reading palette; state colors stay distinct. */
 .series-visual {
-  --series-canvas: #f4f6fa;
-  --series-paper: #ffffff;
-  --series-ink: #243244;
-  --series-secondary: #59677b;
-  --series-rule: #ced7e3;
-  --series-blue: #2855bd;
-  --series-blue-wash: #edf2ff;
+  --series-canvas: #eee8dd;
+  --series-paper: #fffcf6;
+  --series-ink: #343137;
+  --series-secondary: #706971;
+  --series-rule: #ded5c8;
+  --series-blue: #7150a3;
+  --series-blue-wash: #eee7f6;
   --series-feedback: #087c6e;
 }
 [data-theme="dark"] .series-visual {

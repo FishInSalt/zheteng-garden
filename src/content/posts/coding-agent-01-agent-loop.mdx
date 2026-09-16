@@ -1,0 +1,317 @@
+---
+author: 折腾怪
+pubDatetime: 2026-09-16T02:14:36Z
+title: "Coding Agent 原理与实践 01：最小 Agent 与执行循环"
+featured: false
+draft: false
+tags:
+  - Coding Agent
+  - imp
+  - Agent 原理
+description: 从“读取 README，告诉我项目怎样启动”开始，结合带注释的源码节选和逐步演示，理解 Agent Loop 怎样调用模型、执行工具、传回结果，以及处理错误和中断。
+---
+
+import AgentLoopDemo from "@/components/series/AgentLoopDemo.astro";
+
+## 1. 一个小任务：读 README，找到启动命令
+
+你打开一个陌生项目，让 Coding Agent 帮忙：
+
+> 读取 README.md，告诉我项目怎样启动。
+
+模型还没看过 README，需要先请求读取文件。执行循环调用读取工具，把文件内容交给模型，模型才有依据回答项目的启动方式。
+
+如果 README 提到还要查看配置文件，模型就可能继续请求读取，执行循环再把结果交给它。这个过程可能重复多次，直到模型不再请求工具，给出回答。
+
+这段反复调用模型、执行工具的逻辑，就是 **Agent Loop（执行循环）**。下面用代码看看这几步怎样接起来。
+
+## 2. 对照源码，看循环怎么写
+
+先看执行循环的整体结构。暂时不用理解每个参数，留意模型在哪里被调用、工具在哪里执行，以及循环什么时候结束。
+
+下面节选自 imp 的 [`src/core/loop.ts`](https://github.com/FishInSalt/imp/blob/main/src/core/loop.ts)，保留主要语句和命名，并加上中文注释。代码保留上限、中断等检查的位置，较长的处理分支在第 4 节展开。配置、用量统计等细节已省略，`...` 表示省略的参数；这段代码用于讲解，不能单独复制运行。
+
+```ts
+// history 和 tools 由调用者传入，新对话的 history 从空数组开始。
+if (userMessage !== undefined && userMessage !== "") {
+  const user = { role: "user", content: userMessage };
+  history.push(user); // 保存本次用户任务。
+}
+const toolMap = new Map(tools.map(t => [t.name, t]));
+let turns = 0; // 完整模型回复数；maxIterations 是它的上限，见 4.2。
+
+while (true) {
+  // 用户已中断：不再发起模型调用，见 4.3。
+  if (signal?.aborted) return { stopReason: "aborted", turns };
+  // 省略用户追加消息和上下文整理。
+
+  // ① 调用模型；请求失败会抛错，由上层处理，见 4.4。
+  const assistant = await streamAssistant({
+    provider,
+    request: { system, messages: history, tools, signal /* 省略其他配置 */ },
+    onEvent, // 把模型输出交给显示层，见 2.4。
+    // 省略用量统计参数。
+  });
+  // 接收回复时识别到中断，不写入不完整的回复，见 4.3。
+  if (assistant === null) return { stopReason: "aborted", turns };
+
+  // ② 保存回复并计数，再检查是否需要执行工具。
+  history.push(assistant);
+  turns++;
+  const toolCalls = assistant.blocks.filter(b => b.type === "toolCall");
+  if (toolCalls.length === 0) {
+    return { stopReason: "completed", turns }; // 回答经 onEvent 展示。
+  }
+  // 仍请求工具，但已达到上限：本批工具不再执行，见 4.2。
+  if (turns >= maxIterations) {
+    // 此处省略为未执行请求补结果并写入 history 的代码，见 4.2。
+    return { stopReason: "max_iterations", turns };
+  }
+
+  // ③ 执行工具；成功和失败的结果都收集到 results，见 4.1。
+  const results = [];
+  await executeToolBatch(toolCalls, toolMap, signal, ..., results);
+  // 若批次被中断，为还没执行的请求补结果，见 4.3。
+  fillMissingToolResults(toolCalls, results, "(interrupted before this tool ran)");
+  // 省略源码中 results 为空时的防御检查。
+
+  // 保存整批结果，再回到循环入口检查中断或继续调用模型。
+  const toolResults = { role: "toolResult", results };
+  history.push(toolResults);
+}
+```
+
+用户消息的写入和工具映射的建立只在循环前执行一次。进入循环后，每次工具执行完，结果都会加入消息历史，供下一次模型调用使用。模型不再请求工具时，循环结束。下面先解释代码中的三个步骤，再说明回答怎样展示给用户。代码注释中的 4.1–4.4 对应后面的异常处理小节，解释这些检查为什么放在这里、停止前还需要保存什么。
+
+### 2.1 调用模型：输入从哪里来
+
+先看代码中第 ① 步的模型调用。第一次调用时，我们要把“读取 README.md，告诉我项目怎样启动”这个任务发给模型，同时告诉它有哪些工具可以使用。
+
+用户的任务会作为一条消息，放进名为 `history` 的数组。这个数组用来保存对话过程中产生的消息，后续的模型回复和工具结果也会加入其中。现在先放入用户的任务：
+
+```ts
+// userMessage 是用户输入；role 标明这条消息来自用户。
+if (userMessage !== undefined && userMessage !== "") {
+  const user = { role: "user", content: userMessage };
+  history.push(user);
+}
+```
+
+此时 `history` 里只有一条用户消息。接下来把它交给模型，同时附上工具说明，让模型知道可以请求读取文件：
+
+```ts
+const assistant = await streamAssistant({
+  provider, // 模型接入层，负责与所选模型服务通信。
+  request: {
+    system, // 系统指令，说明助手的职责和要求。
+    messages: history, // 当前对话消息，此时只有用户任务。
+    tools, // 可用工具的名称、用途和参数说明。
+    signal, // 中断信号，见 4.3。
+    // 省略其他模型配置。
+  },
+  onEvent, // 接收过程中的事件通知，用于显示模型输出，见 2.4。
+  // 省略用量统计参数。
+});
+```
+
+正常情况下，`streamAssistant` 等待模型接入层返回完整回复，把它交给 `assistant` 变量。中断时可能返回 `null`，请求失败则会抛错，所以核心循环在这里保留了中断判断和错误处理提示。模型接入层怎样与服务通信、组装回复，会在第 02 篇介绍；工具列表怎样定义、工具怎样实现，会在第 03 篇介绍。这里先继续看拿到回复之后要做什么。
+
+### 2.2 检查回复：结束还是执行工具
+
+第 ② 步处理模型返回的 `assistant`。假设模型要求读取 README，这条回复就会包含一次工具请求。下面是它的精简示例。这里使用 imp 的内部消息格式，模型接入层负责转换不同服务的格式：
+
+```json
+{
+  "role": "assistant",
+  "blocks": [
+    {
+      "type": "toolCall",
+      "id": "t1",
+      "name": "read",
+      "arguments": { "path": "README.md" }
+    }
+  ]
+}
+```
+
+`blocks` 数组存放回复中的内容。`type: "toolCall"` 表示这部分是工具请求：调用名为 `read` 的工具，参数是文件路径 `README.md`。模型也可以给出普通文本，或者在一条回复里请求多个工具。
+
+执行循环先保存整条回复，再筛选其中的工具请求。没有工具请求，就结束本次运行；有的话，就继续执行：
+
+```ts
+history.push(assistant); // 记下模型说了什么、请求了什么。
+turns++; // 每条完整回复计一次，上限检查见 4.2。
+
+// 从回复中取出所有工具请求，结果是一个数组。
+const toolCalls = assistant.blocks.filter(b => b.type === "toolCall");
+
+if (toolCalls.length === 0) {
+  return { stopReason: "completed", turns }; // 省略用量统计字段。
+}
+```
+
+在这个例子里，`toolCalls` 只有一项，就是上面那次读取请求。到这里，文件仍没有被读取；代码只是识别出了模型要调用哪个工具。核心循环接着检查 `turns >= maxIterations`，未达到上限才会进入执行工具的步骤，具体处理见 4.2。
+
+### 2.3 执行工具：保存结果并继续调用
+
+第 ③ 步执行刚才取出的工具请求。首先要把请求里的 `read` 对应到真正的读取函数。源码先按名称整理可用工具，得到 `toolMap`；这份映射在进入循环前准备一次，后面可以重复使用：
+
+```ts
+const toolMap = new Map(tools.map(t => [t.name, t]));
+```
+
+`executeToolBatch` 接收刚才筛选出的 `toolCalls`，通过 `toolMap` 找到对应工具，检查并传入参数，然后执行。每次调用的结果会放进 `results` 数组：
+
+```ts
+const results = [];
+// signal 用于传递中断；“...” 省略执行前检查和事件通知参数。
+await executeToolBatch(toolCalls, toolMap, signal, ..., results);
+```
+
+对刚才的请求来说，这一步会找到 `read`，用 `README.md` 作为路径读取文件。具体的参数校验和文件读取实现留到工具系统篇展开。对执行循环来说，读取成功或失败都会得到一项结果；失败后怎样继续见 4.1。如果批次中途被打断，核心循环会先补齐未执行请求的结果，再把整批结果写入历史，见 4.3。
+
+假设 README 中写着“用 `npm run dev` 启动项目”。读取结果先保存在 `results` 中，还没有发给模型。执行循环把它包装成一条工具结果消息，加入对话：
+
+```ts
+const toolResults = { role: "toolResult", results };
+history.push(toolResults);
+```
+
+这条消息仍沿用前面的内部格式，内容简化后如下：
+
+```json
+{
+  "role": "toolResult",
+  "results": [
+    {
+      "toolCallId": "t1",
+      "toolName": "read",
+      "content": "启动命令：npm run dev",
+      "isError": false
+    }
+  ]
+}
+```
+
+`toolCallId` 对应前面请求里的 `id`，说明这是 `t1` 的结果；`isError: false` 表示此次读取成功。同一条回复可能请求读取两个文件，两次工具都叫 `read`，所以要用调用 ID 区分结果。
+
+现在 `history` 里有了用户任务、模型的读取请求和工具返回的文件内容。代码走到 `while` 末尾后，会先检查用户是否中断，再回到第 ① 步，把更新后的历史传给模型。模型这时才会看到读取结果；只把文件内容打印到终端，并不会把它交给模型。
+
+这一次，模型可能给出启动命令，也可能请求继续读取配置文件。第 ② 步会再次检查回复，决定结束运行还是继续执行工具。
+
+### 2.4 把回答展示给用户
+
+模型的回答通过 `onEvent` 交给交互层展示给用户；循环负责保存完整回复，并返回停止状态。流式输出和终端显示的实现，会在第 06 篇「交互与任务生命周期」中展开。
+
+## 3. 模拟运行：代码走到哪里，历史增加了什么
+
+先选择“正常结束”，逐步走完开头那个任务。观察执行位置的变化，以及 `history` 在什么时候增加消息。演示只停在调用模型、写入历史、执行工具等主要动作上，部分条件判断会跳过，不是逐行调试。函数参数和分支写法也作了缩写。演示展示完整消息，不模拟文本片段的逐段显示。演示中的回复计数、上限和中断判断与第二节的核心循环对应，处理原因见第 4 节。
+
+<AgentLoopDemo />
+
+正常路径最后有四条消息：
+
+```text
+user        读取 README.md，告诉我项目怎样启动。
+assistant   请求 read，调用 ID 为 t1。
+toolResult  t1 的结果：启动命令是 npm run dev。
+assistant   README 中给出的启动命令是 npm run dev。
+```
+
+这次 Agent 运行调用模型两次，执行工具一次。第一次模型回复负责提出读取请求，第二次才根据读取结果作答。
+
+你也可以停在“执行工具调用”那一步：此时结果已经放进 `results`，但 `history` 还没变化。下一步才把整批结果写回去。如果模型一次请求两个工具，这两个结果会放在同一条 `toolResult` 消息里。
+
+演示中的数据是预设的。比如错误场景里，模型会把 `README.txt` 改成 `README.md`；这只是为了展示重试过程，真实模型未必每次都能改对。
+
+## 4. 异常处理：哪些地方容易出问题
+
+第二节已经标出了这些处理的位置。这里分别看触发之后，循环要继续执行、补齐历史，还是停止并把控制权交回调用者。
+
+### 4.1 工具失败后，把错误交回模型
+
+对应核心循环第 ③ 步：`executeToolBatch` 返回后，`results` 中可能包含成功结果，也可能包含错误结果。假设模型请求了不存在的 `README.txt`，工具系统返回的一项结果可以是：
+
+```json
+{
+  "toolCallId": "t1",
+  "toolName": "read",
+  "content": "README.txt 不存在",
+  "isError": true
+}
+```
+
+执行循环把它与成功结果一样包装成 `toolResult` 消息，加入 `history`，再发起模型调用。模型看到哪个路径读取失败，可以改用另一个路径，也可能询问用户。第三节的“工具报错后重试”场景展示的就是这条路径。
+
+因此，工具失败不一定意味着本次 Agent 运行结束。循环负责保留结果并继续传递信息；工具查找、参数校验、权限检查和异常怎样转换成错误结果，留到第 03 篇展开。模型如果一直重复失败的请求，就需要下面的上限检查。
+
+### 4.2 模型一直请求工具，循环停不下来
+
+对应核心循环中 `turns >= maxIterations` 的分支。即使错误已经传回去，模型也可能反复尝试，因此执行循环需要设置上限，避免无限重试。
+
+这份实现用 `turns` 记录本次运行收到的完整模型回复数：在循环前设为 0，每次保存完整回复后加 1。一条回复即使包含多个工具请求，也只计一次。
+
+`maxIterations` 是这个计数的上限。检查放在“模型回复包含工具请求”之后、“执行工具”之前。达到上限时，这条回复请求的工具不会执行。第二节省略了返回之前的历史补齐，完整分支如下（用量统计和事件通知仍省略）：
+
+```ts
+if (turns >= maxIterations) {
+  const results = [];
+  // 请求已经进入历史，给它们补上“未执行”的结果。
+  fillMissingToolResults(
+    toolCalls,
+    results,
+    "(not executed: reached max turns)"
+  );
+  // 省略源码中的非空判断和事件通知。
+  history.push({ role: "toolResult", results });
+  return { stopReason: "max_iterations", turns }; // 省略用量统计。
+}
+```
+
+在演示里把场景切到“达到轮次上限”，上限会设为 1。模型第一次回复就请求读取文件，执行循环随即停止，所以这次没有真正读取文件。如果第一次回复直接给出文本回答，没有工具请求，则会在上限检查之前返回 `completed`。这是本例选择的计数方式和检查位置，其他实现也可以按工具调用次数、耗时或费用设置限制。
+
+`completed` 的意思只是“模型没有继续请求工具”。答案对不对、任务有没有做完，还得看实际结果，比如文件内容、代码差异和测试输出。
+
+### 4.3 用户中断时，有些工具还没执行
+
+对应核心循环的三个位置：入口检查 `signal?.aborted`、模型调用后判断 `assistant === null`，以及工具批次结束后补齐结果。前两处可以直接返回 `aborted`；批次中断时，还要处理已经进入历史的工具请求。
+
+假设模型一次请求读取 README 和配置文件，这两个调用按顺序执行。README 已经读完，配置文件还没开始读，用户按下了中断键。
+
+执行循环需要保留第一个结果，并给第二个请求补一条“未执行”的记录。如果只保存模型的请求，没有对应结果，下次继续对话时，模型服务可能拒绝这份不完整的消息历史。
+
+核心循环在 `executeToolBatch` 之后、写入 `history` 之前调用 `fillMissingToolResults`，做的就是这件事。保存这批结果后，下一次回到循环入口会检测到中断并退出，不再调用模型。下面省略了参数的类型声明，函数体保留源码逻辑：
+
+```ts
+function fillMissingToolResults(toolCalls, results, reason) {
+  // 先记住哪些请求已有结果。
+  const answered = new Set(results.map(r => r.toolCallId));
+  for (const call of toolCalls) {
+    if (answered.has(call.id)) continue; // 已完成的结果保留原样。
+    results.push({
+      toolCallId: call.id,
+      toolName: call.name,
+      content: reason, // 例如 "(interrupted before this tool ran)"
+      isError: true,
+    });
+  }
+}
+```
+
+注意，“补一条结果”不等于把工具再执行一遍。它只是在历史中解释这次调用为什么没有执行，也不会撤销之前已经发生的文件修改。
+
+中断还需要往下传。循环可以在入口检查 `signal.aborted`，但模型请求或工具正在运行时，也要由对应实现响应这个信号。已经开始的命令能否及时停止，不能只靠 `while` 开头的一次判断。
+
+### 4.4 模型请求失败，或者响应只收到一半
+
+对应核心循环第 ① 步的 `await streamAssistant(...)`。网络断开、模型服务报错，发生在调用模型的过程中，和 `read` 读取失败不是一回事。此时可能根本没有工具请求，也就没有可对应的 `toolCallId`。这份循环没有捕获这类错误；异常会向上传给调用者，由它报告错误并结束本次运行。也就不会执行后面的 `history.push(assistant)`，或返回正常结束的 `completed`。不能把这类错误随意包装成某个工具的结果。
+
+在这份实现中，`message_end` 是模型接入层定义的内部事件，携带已经组装好的完整消息。`streamAssistant` 收到它才返回回复，不负责拼接响应片段。若识别到中断，它返回 `null`，循环随后以 `aborted` 结束；如果没有中断，却在缺少完整消息的情况下结束了响应流，则抛出错误。
+
+所以，终端上已经显示了一半的文字，不代表历史里已经保存了一条完整回复。界面的流式显示和循环里的消息写入，需要分开处理。
+
+## 5. 从执行循环到模型接入
+
+执行循环把一次次模型调用连接起来：保存消息，执行模型请求的工具，再把结果交回模型。工具失败时，错误也可以成为下一次调用的输入；达到上限或收到中断时，循环则需要妥善保存已有结果，再结束运行。
+
+本篇通过 `streamAssistant` 调用模型，还没有展开它背后的实现。不同模型服务怎样接收消息和工具说明？返回的文本与工具请求又怎样整理成循环能处理的回复？下一篇「模型接入与消息协议」会继续分析这些问题。

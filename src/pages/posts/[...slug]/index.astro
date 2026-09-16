@@ -2,6 +2,8 @@
 import { type CollectionEntry, getCollection, render } from "astro:content";
 import PostLayout from "@/layouts/PostLayout.astro";
 import Header from "@/components/Header.astro";
+import ArticleToc from "@/components/ArticleToc.astro";
+import PostSidebar from "@/components/PostSidebar.astro";
 import Footer from "@/components/Footer.astro";
 import Datetime from "@/components/Datetime.astro";
 import Tag from "@/components/Tag.astro";
@@ -73,6 +75,21 @@ const {
   hideEditPost,
 } = post.data;
 
+// Keep the complete frontmatter title for metadata; separate its reading hierarchy.
+const seriesTitle = title.match(
+  /^(Coding Agent 原理与实践)\s+(\d{2,})[：:]\s*(.+)$/u
+);
+// Keep Chinese words and English words intact when a long title wraps.
+const titleWords = seriesTitle
+  ? Array.from(
+      new Intl.Segmenter("zh-CN", { granularity: "word" }).segment(
+        seriesTitle[3]
+      ),
+      ({ segment }, index) =>
+        index === 0 ? `${seriesTitle[2]}：${segment}` : segment
+    )
+  : null;
+
 const { Content, headings } = await render(post);
 
 let ogImageUrl: string | undefined;
@@ -104,82 +121,79 @@ const ogImage = ogImageUrl
   pubDatetime={pubDatetime}
   modDatetime={modDatetime}
 >
-  <Header />
+  <div class="docs-topbar"><Header /></div>
+  <div class="docs-shell app-layout">
+    <PostSidebar current={post.id} />
 
-  <BackButton />
+    <main id="main-content" class="post-page" data-pagefind-body>
+      <header class="post-heading">
+        <BackButton />
+        {seriesTitle && <p class="post-series-name">{seriesTitle[1]}</p>}
+        <h1
+          style={{ viewTransitionName: toTransitionName(post.id) }}
+          class="font-bold"
+        >
+          {
+            titleWords
+              ? titleWords.map(word => (
+                  <span class="post-title-word">{word}</span>
+                ))
+              : title
+          }
+        </h1>
 
-  <main
-    id="main-content"
-    class:list={["app-layout", { "mt-8": !config.features.showBackButton }]}
-    data-pagefind-body
-  >
-    <h1
-      style={{ viewTransitionName: toTransitionName(post.id) }}
-      class="text-accent inline-block text-2xl font-bold sm:text-3xl"
-    >
-      {title}
-    </h1>
+        <div class="my-2 flex items-center gap-2">
+          <Datetime {pubDatetime} {modDatetime} {timezone} size="lg" />
+          <span
+            aria-hidden="true"
+            class:list={[
+              "text-muted-foreground max-sm:hidden",
+              { hidden: !config.features.editPost?.enabled || hideEditPost },
+            ]}
+          >
+            |
+          </span>
+          <EditPost {hideEditPost} {post} class="max-sm:hidden" />
+        </div>
 
-    <div class="my-2 flex items-center gap-2">
-      <Datetime {pubDatetime} {modDatetime} {timezone} size="lg" />
-      <span
-        aria-hidden="true"
+        <p class="text-muted-foreground mt-3 text-sm" data-pagefind-ignore>
+          作者：{post.data.author}
+        </p>
+      </header>
+      <ArticleToc {headings} />
+      <article
+        id="article"
         class:list={[
-          "text-muted-foreground max-sm:hidden",
-          { hidden: !config.features.editPost?.enabled || hideEditPost },
+          "w-full",
+          "app-prose max-w-app",
+          "prose-pre:bg-(--shiki-light-bg) dark:prose-pre:bg-(--shiki-dark-bg)",
         ]}
       >
-        |
-      </span>
-      <EditPost {hideEditPost} {post} class="max-sm:hidden" />
-    </div>
+        <Content />
+      </article>
+      <div class="post-footer">
+        <hr class="my-8 border-dashed" />
 
-    <p class="text-muted-foreground mt-3 text-sm" data-pagefind-ignore>
-      作者：{post.data.author}
-    </p>
-    {
-      headings.length > 0 && (
-        <details class="article-toc" data-pagefind-ignore>
-          <summary>文章目录</summary>
-          <ul>
-            {headings
-              .filter(h => h.depth === 2)
-              .map(h => (
-                <li>
-                  <a href={`#${h.slug}`}>{h.text}</a>
-                </li>
-              ))}
-          </ul>
-        </details>
-      )
-    }
-    <article
-      id="article"
-      class:list={[
-        "mt-8 w-full",
-        "app-prose max-w-app",
-        "prose-pre:bg-(--shiki-light-bg) dark:prose-pre:bg-(--shiki-dark-bg)",
-      ]}
-    >
-      <Content />
-    </article>
+        <EditPost class="sm:hidden" {hideEditPost} {post} />
 
-    <hr class="my-8 border-dashed" />
+        <BackToTopButton />
 
-    <EditPost class="sm:hidden" {hideEditPost} {post} />
+        <ul class="mt-4 mb-8 flex flex-wrap gap-4 sm:my-8">
+          {
+            tags.map(tag => (
+              <Tag tag={slugifyStr(tag)} tagName={tag} size="sm" />
+            ))
+          }
+        </ul>
 
-    <BackToTopButton />
+        <ShareLinks />
 
-    <ul class="mt-4 mb-8 flex flex-wrap gap-4 sm:my-8">
-      {tags.map(tag => <Tag tag={slugifyStr(tag)} tagName={tag} size="sm" />)}
-    </ul>
+        <hr class="my-8 border-dashed" />
 
-    <ShareLinks />
-
-    <hr class="my-8 border-dashed" />
-
-    <AdjacentPostNav {prevPost} {nextPost} />
-  </main>
+        <AdjacentPostNav {prevPost} {nextPost} />
+      </div>
+    </main>
+  </div>
   <Footer />
 </PostLayout>
 

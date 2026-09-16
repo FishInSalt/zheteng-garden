@@ -9,7 +9,7 @@ export const codingAgentChapters = [
   {
     number: "01",
     title: "最小 Agent 与执行循环",
-    question: "怎样把一次模型调用连成能执行任务的循环？",
+    question: "怎样反复调用模型和工具，让任务继续进行？",
     postId: "coding-agent-01-agent-loop",
   },
   {
@@ -45,13 +45,13 @@ export const codingAgentChapters = [
   {
     number: "07",
     title: "权限与信任边界",
-    question: "项目内容能否加载，工具动作能否执行？",
+    question: "怎样检查项目指令是否可信、工具操作是否被允许？",
     postId: "coding-agent-07-trust",
   },
   {
     number: "08",
     title: "扩展机制",
-    question: "怎样接入工具、命令、上下文和事件钩子？",
+    question: "怎样增加新工具、命令和自定义处理逻辑？",
     postId: "coding-agent-08-extensions",
   },
   {
@@ -62,8 +62,8 @@ export const codingAgentChapters = [
   },
   {
     number: "10",
-    title: "测试、评估与开发复盘",
-    question: "怎样判断程序正确、模型行为有效、任务真的完成？",
+    title: "测试与评估",
+    question: "怎样检查各模块是否按预期工作，以及 Agent 是否完成了任务？",
     postId: "coding-agent-10-evaluation",
   },
 ] as const;
