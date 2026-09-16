@@ -1,0 +1,31 @@
+---
+import type { ArticleStatistics } from "@/utils/remarkArticleStats";
+
+interface Props {
+  stats: ArticleStatistics;
+}
+const { stats } = Astro.props;
+const number = new Intl.NumberFormat("zh-CN");
+---
+
+<p class="article-stats text-muted-foreground" data-pagefind-ignore>
+  <span>约 {number.format(stats.words)} 字</span>
+  {
+    stats.codeLines > 0 && (
+      <>
+        <>
+          <span aria-hidden="true"> · </span>
+          <span>{number.format(stats.codeLines)} 行代码</span>
+        </>
+      </>
+    )
+  }
+</p>
+
+<style>
+  .article-stats {
+    margin-top: 0.4rem;
+    font-size: 0.8rem;
+    line-height: 1.7;
+  }
+</style>

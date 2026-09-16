@@ -1,0 +1,287 @@
+---
+import "./series-visual.css";
+import { providerScenarios } from "@/data/provider-stream-demo";
+const first = providerScenarios[0].steps[0];
+---
+
+<provider-stream-demo class="series-visual not-prose">
+  <header>
+    <strong>从参数片段到完整回复</strong>
+    <p>模拟数据 · 不连接模型、不执行工具。JSON 展示省略用量等无关字段。</p>
+  </header>
+  <div class="controls" data-controls hidden>
+    <label
+      >接收场景
+      <select aria-label="接收场景">
+        {providerScenarios.map(s => <option value={s.id}>{s.label}</option>)}
+      </select>
+    </label>
+    <div class="buttons">
+      <button type="button" data-prev disabled>上一步</button>
+      <button type="button" data-next>下一步</button>
+      <button type="button" data-reset>从头开始</button>
+    </div>
+  </div>
+  <div class="state" role="status" aria-live="polite" aria-atomic="true">
+    <span data-progress>步骤 1 / {providerScenarios[0].steps.length}</span>
+    <strong data-title>{first.title}</strong>
+    <p data-detail>{first.detail}</p>
+  </div>
+  <section class="code-position" aria-label="当前处理代码">
+    <div class="panel-heading">
+      当前处理代码
+    </div><pre><code data-code>{first.code}</code></pre>
+  </section>
+  <div class="panels">
+    <section aria-label="本次收到的事件">
+      <div class="panel-heading">
+        本次收到
+      </div><pre><code data-incoming>{first.incoming}</code></pre>
+    </section>
+    <section aria-label="接入层暂存内容">
+      <div class="panel-heading">
+        接入层暂存
+      </div><pre><code data-cache>{first.cache}</code></pre>
+    </section>
+  </div>
+  <section
+    class="output"
+    data-outcome="waiting"
+    aria-label="交给执行循环的结果"
+  >
+    <div class="panel-heading">
+      交给执行循环
+    </div><pre><code data-output>{first.output}</code></pre>
+  </section>
+  <noscript>
+    <p>
+      交互需要 JavaScript。正常路径如下，参数拼接示例和异常说明也保留在正文中。
+    </p>
+    <ol>
+      {
+        providerScenarios[0].steps.map(step => (
+          <li>
+            <strong>{step.title}</strong>：{step.detail}
+          </li>
+        ))
+      }
+    </ol>
+  </noscript>
+</provider-stream-demo>
+<script>
+  import { providerScenarios } from "@/data/provider-stream-demo";
+  class ProviderStreamDemo extends HTMLElement {
+    private listeners?: AbortController;
+    connectedCallback() {
+      this.listeners?.abort();
+      this.listeners = new AbortController();
+      const { signal } = this.listeners;
+      const select = this.querySelector<HTMLSelectElement>("select")!;
+      const prev = this.querySelector<HTMLButtonElement>("[data-prev]")!;
+      const next = this.querySelector<HTMLButtonElement>("[data-next]")!;
+      const reset = this.querySelector<HTMLButtonElement>("[data-reset]")!;
+      let scenario = providerScenarios[0];
+      let index = 0;
+      select.value = scenario.id;
+      const render = () => {
+        const step = scenario.steps[index];
+        for (const key of [
+          "title",
+          "detail",
+          "code",
+          "incoming",
+          "cache",
+          "output",
+        ] as const) {
+          this.querySelector(`[data-${key}]`)!.textContent = step[key];
+        }
+        this.querySelector("[data-progress]")!.textContent =
+          `步骤 ${index + 1} / ${scenario.steps.length}`;
+        this.querySelector<HTMLElement>("[data-outcome]")!.dataset.outcome =
+          step.outcome;
+        prev.disabled = index === 0;
+        next.disabled = index === scenario.steps.length - 1;
+      };
+      select.addEventListener(
+        "change",
+        () => {
+          scenario =
+            providerScenarios.find(s => s.id === select.value) ??
+            providerScenarios[0];
+          index = 0;
+          render();
+        },
+        { signal }
+      );
+      prev.addEventListener(
+        "click",
+        () => {
+          index = Math.max(0, index - 1);
+          render();
+        },
+        { signal }
+      );
+      next.addEventListener(
+        "click",
+        () => {
+          index = Math.min(scenario.steps.length - 1, index + 1);
+          render();
+        },
+        { signal }
+      );
+      reset.addEventListener(
+        "click",
+        () => {
+          index = 0;
+          render();
+        },
+        { signal }
+      );
+      render();
+      this.querySelector<HTMLElement>("[data-controls]")!.hidden = false;
+    }
+    disconnectedCallback() {
+      this.listeners?.abort();
+    }
+  }
+  if (!customElements.get("provider-stream-demo"))
+    customElements.define("provider-stream-demo", ProviderStreamDemo);
+</script>
+<style>
+  provider-stream-demo {
+    display: block;
+    container-type: inline-size;
+    border: 1px solid var(--series-rule);
+    border-radius: 0.5rem;
+    overflow: hidden;
+    margin: 2rem 0;
+    color: var(--series-ink);
+    background: var(--series-paper);
+    font-size: 0.85rem;
+    line-height: 1.65;
+  }
+  header,
+  .controls,
+  .state,
+  section,
+  noscript {
+    padding: 1rem 1.2rem;
+  }
+  header {
+    background: var(--series-canvas);
+  }
+  header strong {
+    font-size: 1rem;
+  }
+  p {
+    margin: 0.35rem 0 0;
+  }
+  header p,
+  [data-progress] {
+    color: var(--series-secondary);
+    font-size: 0.75rem;
+  }
+  .controls {
+    display: flex;
+    gap: 0.8rem 1.2rem;
+    flex-wrap: wrap;
+    align-items: end;
+  }
+  [hidden] {
+    display: none !important;
+  }
+  label {
+    display: grid;
+    gap: 0.35rem;
+  }
+  .buttons {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+  }
+  select,
+  button {
+    font: inherit;
+    padding: 0.45rem 0.65rem;
+    border: 1px solid var(--series-rule);
+    background: var(--series-paper);
+    color: var(--series-ink);
+    border-radius: 0.3rem;
+    max-width: 100%;
+  }
+  button {
+    cursor: pointer;
+  }
+  button:hover:not(:disabled) {
+    background: var(--series-blue-wash);
+    border-color: var(--series-blue);
+  }
+  button:disabled {
+    opacity: 0.45;
+    cursor: default;
+  }
+  button:focus-visible,
+  select:focus-visible {
+    outline: 2px solid var(--series-blue);
+    outline-offset: 3px;
+  }
+  .state {
+    border-left: 3px solid var(--series-blue);
+    background: var(--series-blue-wash);
+  }
+  .state strong {
+    display: block;
+    margin: 0.25rem 0;
+  }
+  .panel-heading {
+    margin: 0 0 0.7rem;
+    font-size: 0.8rem;
+    font-weight: 650;
+  }
+  section {
+    min-width: 0;
+    border-top: 1px solid var(--series-rule);
+  }
+  pre {
+    margin: 0;
+    padding-top: 1.4rem;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font-size: 0.75rem;
+    line-height: 1.75;
+  }
+  pre code {
+    display: block;
+    background: none;
+    color: inherit;
+    padding: 0;
+    font-size: inherit;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .code-position {
+    background: var(--series-canvas);
+  }
+  .output[data-outcome="ready"] {
+    border-left: 3px solid var(--series-feedback);
+  }
+  .output[data-outcome="error"],
+  .output[data-outcome="aborted"] {
+    border-left: 3px solid var(--series-blue);
+  }
+  noscript {
+    display: block;
+    border-top: 1px solid var(--series-rule);
+  }
+  noscript ol {
+    padding-left: 1.4rem;
+  }
+  @container (min-width: 620px) {
+    .panels {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+    }
+    .panels section + section {
+      border-left: 1px solid var(--series-rule);
+    }
+  }
+</style>
