@@ -1,3 +1,78 @@
+/** Stable code listing shared by all scenarios; helpers are explained in section 2. */
+const providerCodeSections = [
+  {
+    id: "setup",
+    code: "// provider.stream 内的核心流程；省略思考内容与用量统计。\nconst blocks = [];\nlet textBlock = null;\nconst toolByIndex = new Map();\nconst toolRawByIndex = new Map();\nlet stopReason = null;\nlet sawFinish = false;\n",
+  },
+  {
+    id: "receive",
+    code: "for await (const sse of abortSafe(\n  parseSse(response.body), request.signal\n)) {",
+  },
+  { id: "abort", code: "  if (request.signal?.aborted) return;" },
+  { id: "choice", code: "  const choice = sse.data.choices?.[0];\n" },
+  {
+    id: "text",
+    code: '  const content = choice?.delta?.content;\n  if (typeof content === "string" && content !== "") {\n    if (textBlock === null) {\n      textBlock = { type: "text", text: "" };\n      blocks.push(textBlock);\n    }\n    textBlock.text += content;\n    yield { type: "text_delta", text: content };\n  }\n',
+  },
+  {
+    id: "tool",
+    code: "  for (const tc of choice?.delta?.tool_calls ?? []) {\n    let block = toolByIndex.get(tc.index);\n    const name = tc.function?.name;",
+  },
+  {
+    id: "newTool",
+    code: '    if (block === undefined) {\n      block = {\n        type: "toolCall",\n        id: String(tc.id ?? `call_${tc.index}`),\n        name: String(name ?? ""), arguments: {},\n      };\n      toolByIndex.set(tc.index, block);\n      blocks.push(block);\n      toolRawByIndex.set(tc.index, "");\n      yield { type: "tool_call_start", id: block.id, name: block.name };',
+  },
+  {
+    id: "toolName",
+    code: '    } else if (name !== undefined && block.name === "") {\n      block.name = String(name);\n    }',
+  },
+  {
+    id: "params",
+    code: '    const fragment = tc.function?.arguments ?? "";\n    if (fragment !== "") {\n      toolRawByIndex.set(\n        tc.index, (toolRawByIndex.get(tc.index) ?? "") + fragment\n      );\n      yield { type: "tool_call_delta", id: block.id, jsonDelta: fragment };\n    }',
+  },
+  { id: "toolEnd", code: "  }\n" },
+  {
+    id: "finish",
+    code: "  if (choice?.finish_reason != null) {\n    sawFinish = true;\n    stopReason = mapFinishReason(choice.finish_reason);\n  }",
+  },
+  { id: "loopEnd", code: "}\n" },
+  {
+    id: "parse",
+    code: 'for (const [index, raw] of toolRawByIndex) {\n  const ours = toolByIndex.get(index);\n  if (ours !== undefined) {\n    ours.arguments = raw.trim() === "" ? {} : safeParseJson(raw);\n  }\n}\n',
+  },
+  { id: "endAbort", code: "if (request.signal?.aborted) return;" },
+  {
+    id: "missingFinish",
+    code: 'if (!sawFinish) throw new Error("响应可能已被截断");',
+  },
+  {
+    id: "emit",
+    code: 'yield {\n  type: "message_end",\n  message: { role: "assistant", blocks, stopReason },\n};',
+  },
+] as const;
+export type ProviderCodeSection = (typeof providerCodeSections)[number]["id"];
+export const providerCodeLines = providerCodeSections
+  .flatMap(section =>
+    section.code.split("\n").map(text => ({ section: section.id, text }))
+  )
+  .map((line, index) => ({ ...line, number: index + 1 }));
+
+export function describeActiveLines(
+  sections: readonly ProviderCodeSection[]
+): string {
+  const numbers = providerCodeLines
+    .filter(line => sections.includes(line.section))
+    .map(line => line.number);
+  const ranges: string[] = [];
+  for (let i = 0; i < numbers.length; i++) {
+    const start = numbers[i];
+    let end = start;
+    while (numbers[i + 1] === end + 1) end = numbers[++i];
+    ranges.push(start === end ? `${start}` : `${start}–${end}`);
+  }
+  return `高亮：第 ${ranges.join("、")} 行`;
+}
+
 /** Teaching fixtures derived from the provider's assembly steps; no network I/O. */
 interface ToolDelta {
   index: number;
@@ -21,7 +96,7 @@ interface Block {
 export interface ProviderStep {
   title: string;
   detail: string;
-  code: string;
+  activeSections: ProviderCodeSection[];
   incoming: string;
   cache: string;
   output: string;
@@ -63,7 +138,7 @@ function assemble(inputs: Input[]): ProviderStep[] {
     {
       title: "等待第一条事件",
       detail: "HTTP 请求已成功。从完整 SSE 事件开始演示，不模拟网络字节拆分。",
-      code: "for await (const sse of abortSafe(parseSse(response.body), request.signal)) { … }",
+      activeSections: ["receive"],
       incoming: "尚未收到事件",
       cache: "尚无文本或工具参数",
       output: "尚未产出 message_end；不会把片段作为完整消息写入 history。",
@@ -73,7 +148,7 @@ function assemble(inputs: Input[]): ProviderStep[] {
   for (const input of inputs) {
     let title = "";
     let detail = "";
-    let code = "";
+    let activeSections: ProviderCodeSection[] = [];
     let incoming = "";
     let outcome: ProviderStep["outcome"] = "waiting";
     let output = "尚未产出 message_end；不会把片段作为完整消息写入 history。";
@@ -81,7 +156,7 @@ function assemble(inputs: Input[]): ProviderStep[] {
       title = "用户中断，结束接收";
       detail =
         "已有片段不构成完整回复。streamAssistant 检查中断信号后返回 null。";
-      code = "if (request.signal?.aborted) return;";
+      activeSections = ["abort"];
       incoming = "AbortSignal：aborted = true";
       outcome = "aborted";
       output = "不产出 message_end；执行循环以 aborted 结束。";
@@ -102,15 +177,14 @@ function assemble(inputs: Input[]): ProviderStep[] {
         title = "缺少结束原因，拒绝交付";
         detail =
           "即使参数已经能解析，也没有收到 finish_reason，接入层抛出截断错误。";
-        code = 'if (!sawFinish) throw new Error("响应可能已被截断");';
+        activeSections = ["parse", "missingFinish"];
         outcome = "error";
         output = "抛出错误；不产出 message_end，不保存部分 assistant。";
       } else {
         title = "解析参数，交出完整回复";
         detail =
           "参数字符串变成对象。循环现在才能取得 assistant，后续仍要校验工具参数。";
-        code =
-          'ours.arguments = safeParseJson(raw);\nyield { type: "message_end", message: { role: "assistant", blocks, … } };';
+        activeSections = ["parse", "emit"];
         outcome = "ready";
         output = pretty({
           type: "message_end",
@@ -129,8 +203,7 @@ function assemble(inputs: Input[]): ProviderStep[] {
         textBlock.text += content;
         title = "保存文本，先交给显示层";
         detail = "text_delta 可以用于显示，但这次模型回复还没结束。";
-        code =
-          'textBlock.text += content;\nyield { type: "text_delta", text: content };';
+        activeSections.push("text");
       }
       for (const tc of choice?.delta.tool_calls ?? []) {
         let block = calls.get(tc.index);
@@ -154,11 +227,11 @@ function assemble(inputs: Input[]): ProviderStep[] {
         detail = isNew
           ? `保存调用 ID ${block.id}。arguments 先作为字符串累积，尚不执行工具。`
           : `片段只追加到 index ${tc.index}；其他请求的参数保持原样。`;
-        code =
-          (isNew
-            ? "toolByIndex.set(tc.index, block);\nblocks.push(block);\n"
-            : "") +
-          'toolRawByIndex.set(tc.index, (toolRawByIndex.get(tc.index) ?? "") + fragment);\nyield { type: "tool_call_delta", id: block.id, jsonDelta: fragment };';
+        activeSections.push(
+          "tool",
+          ...(isNew ? ["newTool" as const] : []),
+          "params"
+        );
       }
       if (choice?.finish_reason) {
         sawFinish = true;
@@ -166,8 +239,7 @@ function assemble(inputs: Input[]): ProviderStep[] {
         title = "记下结束原因，继续读到流结束";
         detail =
           "finish_reason 为 tool_calls。此时还可能有用量事件，本例接着进入流结束。";
-        code =
-          "sawFinish = true;\nstopReason = mapFinishReason(choice.finish_reason);";
+        activeSections.push("finish");
       }
     }
     const cache = pretty({
@@ -180,7 +252,15 @@ function assemble(inputs: Input[]): ProviderStep[] {
       })),
       sawFinish,
     });
-    steps.push({ title, detail, code, incoming, cache, output, outcome });
+    steps.push({
+      title,
+      detail,
+      activeSections,
+      incoming,
+      cache,
+      output,
+      outcome,
+    });
   }
   return steps;
 }
