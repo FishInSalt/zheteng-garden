@@ -1,0 +1,52 @@
+---
+import PostLinks from "./PostLinks.astro";
+interface Props {
+  current: string;
+}
+const { current } = Astro.props;
+---
+
+<aside class="post-sidebar" data-pagefind-ignore>
+  <div class="desktop-post-list"><PostLinks {current} /></div>
+  <details class="mobile-post-list">
+    <summary>浏览其他文章</summary>
+    <PostLinks {current} />
+  </details>
+</aside>
+<style>
+  .post-sidebar {
+    min-width: 0;
+  }
+  .desktop-post-list {
+    display: none;
+  }
+  .mobile-post-list {
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 1.5rem;
+    padding-bottom: 1rem;
+  }
+  summary {
+    cursor: pointer;
+    color: var(--muted-foreground);
+    font-size: 0.9rem;
+  }
+  details[open] summary {
+    margin-bottom: 1.3rem;
+  }
+  @media (min-width: 1024px) {
+    .post-sidebar {
+      position: sticky;
+      top: 7rem;
+      align-self: start;
+      max-height: calc(100dvh - 8rem);
+      overflow-y: auto;
+      padding-right: 0.25rem;
+    }
+    .desktop-post-list {
+      display: block;
+    }
+    .mobile-post-list {
+      display: none;
+    }
+  }
+</style>

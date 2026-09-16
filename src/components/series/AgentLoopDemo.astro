@@ -1,0 +1,388 @@
+---
+import "./series-visual.css";
+import { loopCode, loopScenarios } from "@/data/agent-loop-demo";
+const first = loopScenarios[0].steps[0];
+---
+
+<agent-loop-demo class="series-visual not-prose">
+  <header>
+    <strong>跟着一条请求，走完执行循环</strong>
+    <p>模拟演示，不调用模型或执行命令。模型回复与工具结果均为预设数据。</p>
+  </header>
+  <div class="controls" data-controls hidden>
+    <label
+      >执行场景
+      <select aria-label="执行场景">
+        {loopScenarios.map(s => <option value={s.id}>{s.label}</option>)}
+      </select>
+    </label>
+    <div class="buttons">
+      <button type="button" data-prev disabled>上一步</button>
+      <button type="button" data-next>下一步</button>
+      <button type="button" data-reset>从头开始</button>
+    </div>
+  </div>
+  <div class="step-state" role="status" aria-live="polite" aria-atomic="true">
+    <span data-progress>步骤 1 / 8 · 模型回复 0 次 · 上限 4 次</span>
+    <strong data-title>{first.title}</strong>
+    <p data-detail>{first.detail}</p>
+  </div>
+  <div class="loop-workspace">
+    <section aria-label="当前执行位置" class="code-panel">
+      <div class="panel-heading">
+        循环流程（源码缩写） <span>高亮行表示当前步骤</span>
+      </div>
+      <ol class="loop-code">
+        {
+          loopCode.map((line, index) => (
+            <li
+              data-line={index + 1}
+              aria-current={index === 0 ? "step" : undefined}
+            >
+              <code>{line}</code>
+            </li>
+          ))
+        }
+      </ol>
+    </section>
+    <section aria-label="消息历史" class="history-panel">
+      <div class="panel-heading">history <span data-count>1 条消息</span></div>
+      <ol class="history" data-history>
+        <li><strong>user</strong><span>{first.append?.[0].text}</span></li>
+      </ol>
+    </section>
+  </div>
+  <noscript>
+    <p>交互需要 JavaScript。正常路径的完整历史如下，异常路径见后文：</p>
+    <ol class="history">
+      {
+        loopScenarios[0].steps
+          .flatMap(s => s.append ?? [])
+          .map(m => (
+            <li>
+              <>
+                <strong>{m.role}</strong>
+                <span>{m.text}</span>
+              </>
+            </li>
+          ))
+      }
+    </ol>
+  </noscript>
+  <footer>
+    演示按主要动作推进，跳过部分条件判断。省略号表示省略的参数或实现；返回值只展示停止原因。模型回复次数对应
+    turns，只计完整回复；演示不模拟文本片段的逐段显示。
+  </footer>
+</agent-loop-demo>
+
+<script>
+  import { loopScenarios } from "@/data/agent-loop-demo";
+
+  class AgentLoopDemo extends HTMLElement {
+    private listeners?: AbortController;
+    connectedCallback() {
+      this.listeners?.abort();
+      this.listeners = new AbortController();
+      const { signal } = this.listeners;
+      const select = this.querySelector<HTMLSelectElement>("select")!;
+      const prev = this.querySelector<HTMLButtonElement>("[data-prev]")!;
+      const next = this.querySelector<HTMLButtonElement>("[data-next]")!;
+      const reset = this.querySelector<HTMLButtonElement>("[data-reset]")!;
+      const history = this.querySelector<HTMLOListElement>("[data-history]")!;
+      let scenario = loopScenarios[0];
+      let index = 0;
+      select.value = scenario.id;
+      const render = () => {
+        const step = scenario.steps[index];
+        this.querySelector("[data-progress]")!.textContent =
+          `步骤 ${index + 1} / ${scenario.steps.length} · 模型回复 ${step.turns} 次 · 上限 ${scenario.limit} 次`;
+        this.querySelector("[data-title]")!.textContent = step.stop
+          ? `${step.title} · ${step.stop}`
+          : step.title;
+        this.querySelector("[data-detail]")!.textContent = step.detail;
+        this.querySelectorAll<HTMLElement>("[data-line]").forEach(line => {
+          if (Number(line.dataset.line) === step.line)
+            line.setAttribute("aria-current", "step");
+          else line.removeAttribute("aria-current");
+        });
+        const messages = scenario.steps
+          .slice(0, index + 1)
+          .flatMap(s => s.append ?? []);
+        history.replaceChildren(
+          ...messages.map(message => {
+            const li = document.createElement("li");
+            const role = document.createElement("strong");
+            const body = document.createElement("span");
+            role.textContent = message.role;
+            body.textContent = message.text;
+            li.append(role, body);
+            return li;
+          })
+        );
+        this.querySelector("[data-count]")!.textContent =
+          `${messages.length} 条消息`;
+        prev.disabled = index === 0;
+        next.disabled = index === scenario.steps.length - 1;
+      };
+      select.addEventListener(
+        "change",
+        () => {
+          scenario =
+            loopScenarios.find(s => s.id === select.value) ?? loopScenarios[0];
+          index = 0;
+          render();
+        },
+        { signal }
+      );
+      prev.addEventListener(
+        "click",
+        () => {
+          index = Math.max(0, index - 1);
+          render();
+        },
+        { signal }
+      );
+      next.addEventListener(
+        "click",
+        () => {
+          index = Math.min(scenario.steps.length - 1, index + 1);
+          render();
+        },
+        { signal }
+      );
+      reset.addEventListener(
+        "click",
+        () => {
+          index = 0;
+          render();
+        },
+        { signal }
+      );
+      render();
+      this.querySelector<HTMLElement>("[data-controls]")!.hidden = false;
+    }
+    disconnectedCallback() {
+      this.listeners?.abort();
+    }
+  }
+  if (!customElements.get("agent-loop-demo"))
+    customElements.define("agent-loop-demo", AgentLoopDemo);
+</script>
+
+<style>
+  agent-loop-demo {
+    display: block;
+    container-type: inline-size;
+    margin: 2rem 0;
+    border: 1px solid var(--series-rule);
+    border-radius: 0.5rem;
+    background: var(--series-paper);
+    color: var(--series-ink);
+    font-size: 0.85rem;
+    line-height: 1.7;
+    overflow: hidden;
+  }
+  header,
+  .controls,
+  .step-state,
+  footer,
+  noscript {
+    padding: 1rem 1.2rem;
+  }
+  header {
+    background: var(--series-canvas);
+  }
+  header strong {
+    font-size: 1rem;
+  }
+  p {
+    margin: 0.4rem 0 0;
+  }
+  header p,
+  footer,
+  .panel-heading span,
+  [data-progress] {
+    color: var(--series-secondary);
+    font-size: 0.75rem;
+  }
+  .controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: end;
+    gap: 0.8rem 1.2rem;
+    border-bottom: 1px solid var(--series-rule);
+  }
+  [hidden] {
+    display: none !important;
+  }
+  label {
+    display: grid;
+    gap: 0.35rem;
+    font-size: 0.75rem;
+  }
+  select,
+  button {
+    font: inherit;
+    color: var(--series-ink);
+    border: 1px solid var(--series-rule);
+    border-radius: 0.3rem;
+    background: var(--series-paper);
+    padding: 0.45rem 0.65rem;
+    min-height: 2.75rem;
+  }
+  select {
+    font-size: 0.85rem;
+    max-width: 100%;
+  }
+  button {
+    cursor: pointer;
+  }
+  button[data-next] {
+    color: var(--series-blue);
+    background: var(--series-blue-wash);
+    border-color: var(--series-blue);
+  }
+  button:disabled {
+    opacity: 0.45;
+    cursor: default;
+  }
+  button:focus-visible,
+  select:focus-visible {
+    outline: 2px solid var(--series-blue);
+    outline-offset: 3px;
+  }
+  .buttons {
+    display: flex;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+  }
+  .step-state {
+    min-height: 9rem;
+    border-left: 3px solid var(--series-blue);
+    background: var(--series-blue-wash);
+  }
+  .step-state strong,
+  [data-progress] {
+    display: block;
+  }
+  .step-state strong {
+    margin-top: 0.4rem;
+    overflow-wrap: anywhere;
+  }
+  .panel-heading {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 0.5rem;
+    padding: 0.75rem 1.2rem 0.35rem;
+    font-weight: 600;
+  }
+  .panel-heading span {
+    font-weight: 400;
+  }
+  .loop-code {
+    list-style: decimal;
+    padding: 0.3rem 0.6rem 0.8rem 2.6rem;
+    margin: 0;
+    font-size: 0.8125rem;
+    line-height: 1.8;
+  }
+  .loop-code li {
+    margin: 0;
+    padding: 0.12rem 0.35rem;
+    border-left: 2px solid transparent;
+  }
+  .loop-code li::marker {
+    color: var(--series-secondary);
+  }
+  .loop-code code {
+    font-size: inherit;
+    background: none;
+    color: inherit;
+    padding: 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .loop-code [aria-current="step"] {
+    background: var(--series-blue-wash);
+    border-color: var(--series-blue);
+    color: var(--series-blue);
+  }
+  .history-panel {
+    border-top: 1px solid var(--series-rule);
+  }
+  .history {
+    list-style: none;
+    margin: 0;
+    padding: 0.3rem 1.2rem 1rem;
+  }
+  .history :global(li) {
+    display: grid;
+    grid-template-columns: 5.4rem minmax(0, 1fr);
+    gap: 0.6rem;
+    margin: 0;
+    padding: 0.65rem 0;
+    border-bottom: 1px solid var(--series-rule);
+  }
+  .history :global(strong) {
+    color: var(--series-feedback);
+    font-size: 0.75rem;
+  }
+  .history :global(span) {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font-size: 0.8rem;
+  }
+  footer {
+    padding-top: 0;
+  }
+  @media (max-width: 480px) {
+    header,
+    .controls,
+    .step-state,
+    footer,
+    noscript {
+      padding: 0.85rem;
+    }
+    .step-state {
+      min-height: 11rem;
+    }
+    .history {
+      padding-inline: 0.85rem;
+    }
+    .history :global(li) {
+      grid-template-columns: 1fr;
+      gap: 0.15rem;
+    }
+    .panel-heading {
+      padding-inline: 0.85rem;
+    }
+    .loop-code {
+      padding-left: 2.2rem;
+    }
+  }
+  @container (min-width: 780px) {
+    .loop-workspace {
+      display: grid;
+      grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr);
+    }
+    .history-panel {
+      border-top: 0;
+      border-left: 1px solid var(--series-rule);
+    }
+    .history :global(li) {
+      grid-template-columns: 1fr;
+      gap: 0.2rem;
+    }
+    .step-state {
+      min-height: 8rem;
+    }
+    .controls {
+      justify-content: space-between;
+    }
+    footer {
+      padding-top: 1rem;
+      border-top: 1px solid var(--series-rule);
+    }
+  }
+</style>

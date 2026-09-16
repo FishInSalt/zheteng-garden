@@ -1,103 +1,229 @@
 ---
 import "./series-visual.css";
-const steps = [
-  {
-    title: "接收任务",
-    who: "交互层",
-    text: "把用户的目标和约束交给运行程序。",
-  },
-  {
-    title: "组织信息，调用模型",
-    who: "上下文 · 模型接入",
-    text: "发送任务、历史与工具说明，接收模型的回答或工具请求。",
-  },
-  {
-    title: "执行动作，回传事实",
-    who: "执行循环 · 工具",
-    text: "检查请求并读取、修改文件或运行测试；把成功或失败结果加入历史，再回到第 2 步。",
-  },
-  {
-    title: "结束这一轮",
-    who: "执行循环 · 交互层",
-    text: "模型不再请求工具时显示回答；用户中断或达到轮数上限也会结束运行。",
-  },
-];
 ---
 
 <figure class="task-overview series-visual not-prose">
-  <ol>
-    {
-      steps.map((step, index) => (
-        <li>
-          <span class="step" aria-hidden="true">
-            {index + 1}
-          </span>
-          <div>
-            <>
-              <strong>{step.title}</strong>
-              <span class="who">{step.who}</span>
-              <p>{step.text}</p>
-            </>
-          </div>
-        </li>
-      ))
-    }
-  </ol>
+  <div
+    class="flowchart"
+    role="img"
+    aria-label="基本执行流程：接收任务并加入历史，调用模型，记录模型回复。如果模型请求调用工具，就执行工具，将执行结果或错误加入历史，再次调用模型；如果没有工具请求，就显示回答并结束本次运行。"
+  >
+    <div class="node start forward" style="--row: 1">
+      <strong>接收任务</strong><span>加入消息历史</span>
+    </div>
+    <div class="node model forward" style="--row: 2">
+      <strong>调用模型</strong><span>携带历史与工具说明</span>
+    </div>
+    <div class="node forward" style="--row: 3">
+      <strong>记录模型回复</strong>
+    </div>
+    <div class="node decision forward" style="--row: 4">
+      <svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+        <polygon points="1,50 50,1 99,50 50,99"></polygon>
+      </svg>
+      <strong>模型请求<br />调用工具？</strong>
+      <span class="yes">是</span>
+    </div>
+    <div class="node tool forward" style="--row: 5">
+      <strong>执行工具</strong>
+    </div>
+    <div class="node result" style="--row: 6">
+      <strong>将执行结果或错误<br />加入消息历史</strong>
+    </div>
+    <div class="node finish" style="--row: 7">
+      <strong>显示回答</strong><span>结束本次运行</span>
+    </div>
+    <div class="exit-route"><span>否</span></div>
+    <div class="return-route"><span>带着结果再次调用</span></div>
+  </div>
   <figcaption>
-    机制示意。第 2、3
-    步可能重复多次；一轮执行结束后，仍要依据文件和测试结果判断任务是否完成。
+    基本流程示意。工具结果加入历史后，沿右侧箭头回到“调用模型”；没有工具请求时，沿左侧箭头结束运行。
   </figcaption>
+  <p class="flow-note">
+    用户中断、达到轮数上限或模型请求失败也可能结束运行，01
+    章再展开这些情况。运行结束后，仍需检查修改和测试结果，判断任务是否完成。
+  </p>
 </figure>
+
 <style>
   .task-overview {
     margin: 1.7rem 0;
     color: var(--series-ink);
     font-size: 0.9rem;
-    line-height: 1.7;
+    line-height: 1.6;
+    container-type: inline-size;
   }
-  .task-overview ol {
-    list-style: none;
-    padding: 0;
-    margin: 0;
-  }
-  .task-overview li {
-    position: relative;
+  .flowchart {
+    --node-height: 76px;
+    --arrow: var(--series-blue);
     display: grid;
-    grid-template-columns: 2rem 1fr;
-    gap: 0.75rem;
-    padding: 0 0 1.2rem;
-    margin: 0;
-  }
-  .task-overview li:not(:last-child)::before {
-    content: "";
-    position: absolute;
-    top: 2rem;
-    bottom: 0.2rem;
-    left: 0.95rem;
-    border-left: 1px solid var(--series-rule);
-  }
-  .step {
-    display: grid;
-    place-content: center;
-    height: 2rem;
+    grid-template-columns: 2.5rem minmax(0, 23rem) 2.5rem;
+    grid-template-rows: repeat(7, var(--node-height));
+    row-gap: 28px;
+    justify-content: center;
+    padding: 1.25rem 1rem;
     border: 1px solid var(--series-rule);
-    border-radius: 50%;
-    color: var(--series-blue);
-    font-variant-numeric: tabular-nums;
+    border-radius: 0.6rem;
+    background: var(--series-canvas);
   }
-  .who {
-    display: block;
-    color: var(--series-secondary);
-    font-size: 0.75rem;
-    margin: 0.1rem 0;
+  .node {
+    position: relative;
+    grid-column: 2;
+    grid-row: var(--row);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.15rem;
+    min-width: 0;
+    padding: 0.4rem;
+    border: 1px solid var(--series-secondary);
+    border-radius: 0.5rem;
+    background: var(--series-paper);
+    text-align: center;
   }
-  .task-overview p {
-    margin: 0.25rem 0 0;
+  .node strong {
+    font-size: 0.9rem;
   }
-  .task-overview figcaption {
+  .node > span {
     font-size: 0.8rem;
     color: var(--series-secondary);
-    border-top: 1px solid var(--series-rule);
-    padding-top: 0.7rem;
+  }
+  .start,
+  .finish {
+    border-radius: 2rem;
+  }
+  .model {
+    border-color: var(--series-blue);
+    background: var(--series-blue-wash);
+  }
+  .tool,
+  .result {
+    border-color: var(--series-feedback);
+  }
+  .forward::after {
+    content: "";
+    position: absolute;
+    top: 100%;
+    left: 50%;
+    width: 2px;
+    height: 28px;
+    background: var(--arrow);
+    transform: translateX(-50%);
+  }
+  .forward::before {
+    content: "";
+    position: absolute;
+    z-index: 1;
+    top: calc(100% + 21px);
+    left: 50%;
+    border-left: 5px solid transparent;
+    border-right: 5px solid transparent;
+    border-top: 7px solid var(--arrow);
+    transform: translateX(-50%);
+  }
+  .decision {
+    border: 0;
+    border-radius: 0;
+    background: none;
+    padding: 0;
+  }
+  .decision svg {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+  }
+  .decision polygon {
+    fill: var(--series-blue-wash);
+    stroke: var(--series-blue);
+    stroke-width: 1;
+    vector-effect: non-scaling-stroke;
+  }
+  .decision strong {
+    position: relative;
+    font-size: 0.85rem;
+    line-height: 1.5;
+  }
+  .decision .yes {
+    position: absolute;
+    z-index: 2;
+    top: calc(100% + 2px);
+    left: calc(50% + 9px);
+    color: var(--series-blue);
+    font-weight: 600;
+  }
+  .exit-route,
+  .return-route {
+    position: relative;
+    margin-block: calc(var(--node-height) / 2);
+    border-block: 2px solid var(--arrow);
+    color: var(--arrow);
+    font-size: 0.75rem;
+    font-weight: 600;
+  }
+  .exit-route {
+    grid-column: 1;
+    grid-row: 4 / 8;
+    border-left: 2px solid var(--arrow);
+  }
+  .exit-route span {
+    position: absolute;
+    top: -1.6rem;
+    left: 0.5rem;
+  }
+  .return-route {
+    grid-column: 3;
+    grid-row: 2 / 7;
+    border-right: 2px solid var(--arrow);
+  }
+  .return-route span {
+    position: absolute;
+    top: 50%;
+    right: -0.6rem;
+    transform: translateY(-50%);
+    writing-mode: vertical-rl;
+    letter-spacing: 0.15em;
+    padding-block: 0.6rem;
+    background: var(--series-canvas);
+  }
+  .exit-route::after {
+    content: "";
+    position: absolute;
+    right: -1px;
+    bottom: -6px;
+    border-block: 5px solid transparent;
+    border-left: 7px solid var(--arrow);
+  }
+  .return-route::after {
+    content: "";
+    position: absolute;
+    left: -1px;
+    top: -6px;
+    border-block: 5px solid transparent;
+    border-right: 7px solid var(--arrow);
+  }
+  figcaption,
+  .flow-note {
+    font-size: 0.8rem;
+    color: var(--series-secondary);
+  }
+  figcaption {
+    margin-top: 0.75rem;
+  }
+  .flow-note {
+    margin: 0.5rem 0 0;
+  }
+  @container (max-width: 420px) {
+    .flowchart {
+      grid-template-columns: 1.75rem minmax(0, 1fr) 1.75rem;
+      padding-inline: 0.75rem;
+    }
+    .node strong {
+      font-size: 0.85rem;
+    }
+    .node > span {
+      font-size: 0.75rem;
+    }
   }
 </style>

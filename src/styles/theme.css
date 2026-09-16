@@ -12,14 +12,14 @@
 }
 :root,
 [data-theme="light"] {
-  --background: #f8faff;
-  --foreground: #25354c;
-  --accent: #3158cc;
+  --background: #f6f1e7;
+  --foreground: #343137;
+  --accent: #7150a3;
   --accent-foreground: #ffffff;
-  --muted: #eaf0fb;
-  --muted-foreground: #596b85;
-  --border: #dbe3f1;
-  --surface: #ffffff;
+  --muted: #eee6d9;
+  --muted-foreground: #706971;
+  --border: #ded5c8;
+  --surface: #fffcf6;
 }
 [data-theme="dark"] {
   --background: #172235;

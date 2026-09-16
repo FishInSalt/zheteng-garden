@@ -1,0 +1,169 @@
+---
+interface Props {
+  headings: { depth: number; slug: string; text: string }[];
+}
+const headings = Astro.props.headings.filter(
+  h => h.depth === 2 || h.depth === 3
+);
+---
+
+{
+  headings.length > 0 && (
+    <article-navigation data-pagefind-ignore>
+      <nav class="desktop-toc" aria-label="文章目录">
+        <h2>本篇内容</h2>
+        <ol>
+          {headings.map(h => (
+            <li class:list={{ subheading: h.depth === 3 }}>
+              <a href={`#${h.slug}`}>{h.text}</a>
+            </li>
+          ))}
+        </ol>
+      </nav>
+      <details class="mobile-toc">
+        <summary>文章目录</summary>
+        <nav aria-label="文章目录">
+          <ol>
+            {headings.map(h => (
+              <li class:list={{ subheading: h.depth === 3 }}>
+                <a href={`#${h.slug}`}>{h.text}</a>
+              </li>
+            ))}
+          </ol>
+        </nav>
+      </details>
+    </article-navigation>
+  )
+}
+
+<script>
+  class ArticleNavigation extends HTMLElement {
+    private cleanup?: () => void;
+    connectedCallback() {
+      this.cleanup?.();
+      const links = [
+        ...this.querySelectorAll<HTMLAnchorElement>('a[href^="#"]'),
+      ];
+      const sections = [
+        ...new Set(links.map(a => decodeURIComponent(a.hash.slice(1)))),
+      ]
+        .map(id => document.getElementById(id))
+        .filter((h): h is HTMLElement => h !== null);
+      let frame = 0;
+      const update = () => {
+        frame = 0;
+        let current = sections[0]?.id;
+        for (const heading of sections) {
+          if (
+            heading.getBoundingClientRect().top <=
+            Math.min(300, window.innerHeight * 0.35)
+          )
+            current = heading.id;
+          else break;
+        }
+        for (const link of links) {
+          if (decodeURIComponent(link.hash.slice(1)) === current)
+            link.setAttribute("aria-current", "location");
+          else link.removeAttribute("aria-current");
+        }
+      };
+      const schedule = () => {
+        if (!frame) frame = requestAnimationFrame(update);
+      };
+      window.addEventListener("scroll", schedule, { passive: true });
+      window.addEventListener("resize", schedule);
+      schedule();
+      this.cleanup = () => {
+        window.removeEventListener("scroll", schedule);
+        window.removeEventListener("resize", schedule);
+        cancelAnimationFrame(frame);
+      };
+    }
+    disconnectedCallback() {
+      this.cleanup?.();
+    }
+  }
+  if (!customElements.get("article-navigation"))
+    customElements.define("article-navigation", ArticleNavigation);
+</script>
+
+<style>
+  article-navigation {
+    display: block;
+    min-width: 0;
+  }
+  .desktop-toc {
+    display: none;
+  }
+  .mobile-toc {
+    margin-bottom: 2rem;
+    padding: 1rem 1.2rem;
+    border: 1px solid var(--border);
+    border-radius: 0.65rem;
+    background: var(--surface);
+  }
+  summary {
+    cursor: pointer;
+    font-weight: 600;
+  }
+  ol {
+    list-style: none;
+    margin: 1rem 0 0;
+    padding: 0;
+  }
+  li {
+    margin: 0;
+  }
+  a {
+    display: block;
+    border-left: 2px solid transparent;
+    padding: 0.45rem 0 0.45rem 1rem;
+    color: var(--muted-foreground);
+    font-size: 0.9rem;
+    line-height: 1.6;
+    text-decoration: none;
+  }
+  .subheading a {
+    padding-left: 1.7rem;
+    font-size: 0.8rem;
+  }
+  a:hover,
+  a[aria-current="location"] {
+    color: var(--accent);
+  }
+  a[aria-current="location"] {
+    border-color: var(--accent);
+    font-weight: 600;
+  }
+  @media (min-width: 1280px) {
+    article-navigation {
+      grid-column: 2;
+      grid-row: 1 / 4;
+      align-self: start;
+      position: sticky;
+      top: 7rem;
+      max-height: calc(100dvh - 8rem);
+      overflow-y: auto;
+      padding-bottom: 0.25rem;
+    }
+    .mobile-toc {
+      display: none;
+    }
+    .desktop-toc {
+      display: block;
+    }
+    h2 {
+      font-size: 0.95rem;
+      font-weight: 700;
+      margin: 0 0 1rem 1rem;
+      color: var(--foreground);
+    }
+    ol {
+      border-left: 1px solid var(--border);
+      margin-top: 0;
+    }
+    a {
+      margin-left: -1px;
+    }
+  }
+</style>
