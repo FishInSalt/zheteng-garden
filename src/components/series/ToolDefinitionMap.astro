@@ -1,0 +1,260 @@
+---
+import "./series-visual.css";
+
+const mapCode = [
+  "const toolMap = new Map(",
+  "  tools.map(t => [t.name, t])",
+  ");",
+].join("\n");
+---
+
+<figure
+  class="tool-definition-map series-visual not-prose"
+  aria-labelledby="tool-map-title"
+>
+  <p class="figure-title" id="tool-map-title">
+    同一个 read 工具：模型怎样选择，Agent 怎样执行
+  </p>
+
+  <section class="collection" aria-label="创建 read 工具并加入可用工具集合">
+    <strong class="stage-title">① 把创建好的 read 工具加入 tools</strong>
+    <ol class="lookup-steps creation-steps">
+      <li>
+        <strong>创建工具</strong>
+        <div class="step-data">
+          <code>createReadTool(&#123; cwd &#125;)</code>
+        </div>
+        <p class="step-note">对应上方初始化代码</p>
+      </li>
+      <li>
+        <strong>返回 read 工具对象</strong>
+        <div class="step-data">
+          <code>name: "read"</code>
+          <span>工具说明 + execute 函数</span>
+        </div>
+      </li>
+      <li>
+        <strong>加入本次运行的 tools</strong>
+        <div class="step-data">
+          <code>tools</code><span>包含 read、bash 等工具对象</span>
+        </div>
+      </li>
+    </ol>
+  </section>
+
+  <p class="stage-bridge">
+    加入集合后，同一个 <code>read</code> 工具对象既提供发给模型的说明，也保留供 Agent
+    执行的函数。
+  </p>
+
+  <section
+    class="preparation"
+    aria-label="调用模型前发送工具说明并保留本地实现"
+  >
+    <strong class="stage-title">② 调用模型前：发送工具说明，保留本地实现</strong
+    >
+    <div class="branches">
+      <section class="destination" aria-label="提取并发送工具说明">
+        <strong>提取并发送工具说明</strong>
+        <div class="step-data">
+          <p class="data-label">body.tools 中的 read 工具说明</p>
+          <code>name: "read"</code>
+          <code>description: "读取文本文件"</code>
+          <span>parameters：path 是必填的字符串</span>
+        </div>
+        <p class="step-note">模型据此选择 read，并填写文件路径。</p>
+        <p class="subtle">
+          模型接入层从 <code>request.tools</code> 提取说明，按 Chat Completions API
+          格式转换后放入 <code>body.tools</code
+          >。这里仅示意关键字段，转换过程见《模型接入·上》2.2 节。
+        </p>
+      </section>
+      <section class="destination local" aria-label="按名称保存完整工具对象">
+        <strong>按名称保存完整工具对象</strong>
+        <div class="step-data">
+          <code>{mapCode}</code>
+          <div class="data-result">
+            <code>"read" → read 工具对象</code><span
+              >保留工具说明 + execute 函数</span
+            >
+          </div>
+        </div>
+        <p class="step-note">Agent 据此找到工具，检查参数并执行。</p>
+        <p class="subtle">
+          映射保存的是完整工具对象，模型返回名称后就能找到对应实现。
+        </p>
+      </section>
+    </div>
+    <p class="subtle preparation-note">
+      模型接入层只提取需要发送的说明，本地仍保留完整工具对象。
+    </p>
+  </section>
+
+  <section class="lookup" aria-label="模型选择 read 后按名称找到实现">
+    <strong class="stage-title">③ 模型选择 read 后：用名称找到实现</strong>
+    <ol class="lookup-steps">
+      <li>
+        <strong>解析出工具调用</strong>
+        <div class="step-data">
+          <code>name: "read"</code>
+          <code>arguments: &#123; path: "README.md" &#125;</code>
+        </div>
+      </li>
+      <li>
+        <strong>按名称查找</strong>
+        <div class="step-data"><code>toolMap.get("read")</code></div>
+        <p class="step-note">取出刚才保存的工具对象</p>
+      </li>
+      <li>
+        <strong>检查通过后执行</strong>
+        <div class="step-data"><code>tool.execute(args, signal)</code></div>
+        <p class="step-note">将文件路径交给读取函数</p>
+      </li>
+    </ol>
+  </section>
+
+  <figcaption>
+    工具名称把模型看到的说明与本地执行函数对应起来。图中代码与数据用于说明机制，省略了完整
+    API 包装、参数规则和部分调用字段。
+  </figcaption>
+</figure>
+
+<style>
+  .tool-definition-map {
+    container-type: inline-size;
+    color: var(--series-ink);
+    margin: 1.75rem 0;
+    font-size: 0.85rem;
+    line-height: 1.65;
+  }
+  .figure-title {
+    font-size: 1rem;
+    font-weight: 700;
+    margin-bottom: 1rem;
+  }
+  .stage-title {
+    display: block;
+    font-size: 0.92rem;
+  }
+  .collection,
+  .destination,
+  .lookup {
+    border: 1px solid var(--series-rule);
+    border-radius: 0.4rem;
+    padding: 1rem;
+    background: var(--series-paper);
+  }
+  .collection {
+    border-color: var(--series-blue);
+  }
+  .stage-bridge {
+    margin-top: 0.8rem;
+  }
+  .creation-steps {
+    --flow-arrow: var(--series-blue);
+  }
+  .preparation,
+  .lookup {
+    margin-top: 1.2rem;
+  }
+  .branches {
+    display: grid;
+    gap: 0.8rem;
+    margin-top: 0.65rem;
+  }
+  .destination {
+    min-width: 0;
+  }
+  .local {
+    border-color: var(--series-blue);
+  }
+  p {
+    margin: 0.4rem 0;
+  }
+  .subtle,
+  figcaption,
+  .step-note {
+    color: var(--series-secondary);
+    font-size: 0.78rem;
+  }
+  code {
+    font-size: 0.8rem;
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+  }
+  .step-data {
+    margin: 0.5rem 0;
+    padding: 0.65rem;
+    background: var(--series-canvas);
+    border-radius: 0.25rem;
+    min-width: 0;
+  }
+  .step-data code {
+    display: block;
+    padding: 0;
+    background: transparent;
+    border-radius: 0;
+    line-height: 1.65;
+  }
+  .step-data span {
+    display: block;
+    font-size: 0.78rem;
+    margin-top: 0.25rem;
+  }
+  .data-label {
+    margin: 0 0 0.5rem;
+    color: var(--series-secondary);
+    font-size: 0.76rem;
+  }
+  .data-result {
+    margin-top: 0.6rem;
+    padding-top: 0.5rem;
+    border-top: 1px solid var(--series-rule);
+  }
+  .preparation-note {
+    margin-top: 0.65rem;
+  }
+  .lookup {
+    border-top: 3px solid var(--series-feedback);
+  }
+  .lookup-steps {
+    display: grid;
+    list-style: none;
+    margin: 0.8rem 0 0;
+    padding: 0;
+    gap: 1.6rem;
+  }
+  .lookup-steps li {
+    position: relative;
+    min-width: 0;
+  }
+  .lookup-steps li + li::before {
+    content: "↓";
+    position: absolute;
+    top: -1.55rem;
+    color: var(--flow-arrow, var(--series-feedback));
+  }
+  .lookup-steps strong {
+    display: block;
+  }
+  .lookup-steps strong {
+    margin-bottom: 0.35rem;
+  }
+  figcaption {
+    margin-top: 0.7rem;
+  }
+  @container (min-width: 600px) {
+    .branches {
+      grid-template-columns: 1fr 1fr;
+    }
+    .lookup-steps {
+      grid-template-columns: 1.1fr 1fr 1fr;
+      gap: 1.8rem;
+    }
+    .lookup-steps li + li::before {
+      content: "→";
+      top: 0;
+      left: -1.35rem;
+    }
+  }
+</style>

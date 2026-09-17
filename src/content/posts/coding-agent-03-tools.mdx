@@ -1,0 +1,558 @@
+---
+author: 折腾怪
+pubDatetime: 2026-09-17T16:16:36Z
+title: "Coding Agent 原理与实践 03：工具系统：定义、调用与反馈"
+featured: false
+draft: false
+tags:
+  - Coding Agent
+  - imp
+  - Agent 原理
+description: 从给 Agent 增加一种能力出发，解释工具怎样定义、注册、校验和执行，怎样统一返回结果，以及取消与并发调度需要约定什么。
+---
+
+import ToolDefinitionMap from "@/components/series/ToolDefinitionMap.astro";
+
+## 1. 模型提出工具请求后，谁来执行？
+
+继续前面的任务：**“读取 README.md，告诉我项目怎样启动。”** 第 02 章讲到，模型接入层把服务返回的内容组装成完整回复，再交给 Agent 循环。如果回复中包含对 `read` 工具的调用，Agent 就会根据其中的文件路径执行读取，并在下一次调用模型服务时，把读取结果交回模型。
+
+如果接下来让 Agent 运行项目里的测试，它就需要调用执行命令的 `bash` 工具。`read` 和 `bash` 两个工具做的事情不同，但 Agent 调用它们的流程相同：先找到对应工具、检查参数，再执行工具，最后把结果交回 Agent 循环。工具系统为这些步骤提供统一约定：**每个工具按相同的接口接入，调用方按同一套流程使用它。** 本篇用 `read` 和 `bash` 的核心代码，解释这套约定如何落到实现中。
+
+## 2. 从工具定义到调用执行
+
+`read` 负责读取文件，`bash` 负责执行命令。Agent 循环怎样通过同一套流程调用它们？先把整个过程分成两个阶段：
+
+**调用模型前，准备好可用工具：**
+
+1. 为每个工具定义名称、用途、参数要求和执行函数。接口定义见 [`tools/types.ts`](https://github.com/FishInSalt/imp/blob/main/src/core/tools/types.ts)。
+2. 确定本次运行可用的工具集合，相关初始化见 [`runner.ts`](https://github.com/FishInSalt/imp/blob/main/src/runner.ts)。模型接入层将工具的名称、用途和参数要求发送给模型，执行函数保留在本地。
+
+**模型回复中包含工具调用时，处理逻辑见 [`loop.ts`](https://github.com/FishInSalt/imp/blob/main/src/core/loop.ts)：**
+
+1. 根据工具名称找到对应实现，检查调用参数是否符合要求，以及本次操作是否允许执行。
+2. 执行工具，将输出或错误整理成统一的结果，交回 Agent 循环。
+
+第 02 章讲过，模型接入层会把服务返回的内容转换成 Agent 内部统一的消息格式。下面先看源码中，Agent 怎样识别回复里的工具调用，并找到对应工具来执行。
+
+**`runAgentLoop`：取出工具调用，交给执行流程。**
+
+```ts
+// 文件：src/core/loop.ts
+// 所在函数：runAgentLoop
+// 节选：省略类型、事件通知及下方标出的步骤，不能直接运行。
+// 初始化：tools 是本次可用的工具集合。
+const toolMap = new Map(tools.map((t) => [t.name, t]));
+
+// ……省略调用模型、接收并保存回复等中间代码。
+// 收到并保存模型回复后：取出其中的工具调用。
+const toolCalls = assistant.blocks.filter((b) => b.type === "toolCall");
+// 省略没有工具调用、达到轮次上限时的结束判断。
+const results = [];
+await executeToolBatch(toolCalls, toolMap, signal, onToolCall, onEvent, results);
+```
+
+循环初始化时，用本次可用的 `tools` 建立 `toolMap`，保存工具名称与实现的对应关系。
+
+模型接入层返回完整回复 `assistant` 后，Agent 循环从它的 `blocks` 数组中筛选出类型为 `toolCall` 的块。每个块描述一次工具调用。以读取 README 为例，其中包含：
+
+- `name`：`"read"`，指定读取工具。
+- `arguments`：`{ path: "README.md" }`，告诉工具读取哪个文件。
+- `id`：这次调用的标识，返回结果时带上它，让模型知道结果对应哪次调用。
+
+这些调用保存在 `toolCalls` 数组中，接着交给 `executeToolBatch` 处理。
+
+**`executeToolBatch`：安排执行，收集调用结果。**
+
+```ts
+// 文件：src/core/loop.ts
+// 所在函数：executeToolBatch
+// 节选：省略类型；此片段不能直接运行。
+// 串行分支：处理第 i 个工具调用。
+// 省略遍历、取消检查、串行/并发判断和事件通知。
+const call = toolCalls[i];
+const result = await executeToolCall(
+  call.id, call.name, call.arguments, toolMap, signal, onToolCall
+);
+results.push(result);
+```
+
+一条回复可能包含多个工具调用，由 `executeToolBatch` 安排它们的执行。这里节选串行分支中的一次调用：取出 `toolCalls[i]`，把它的 ID、名称和参数交给 `executeToolCall`，等待返回后将结果加入 `results`。后续调用仍由 `executeToolBatch` 继续处理，多次调用的执行安排在 2.5 节讨论。
+
+**`executeToolCall`：查找、检查并执行一次工具调用。**
+
+```ts
+// 文件：src/core/loop.ts
+// 节选：省略参数类型，依赖的辅助函数在后文展开。
+async function executeToolCall(id, name, args, toolMap, signal, onToolCall) {
+  const call = { id, name, arguments: args };
+
+  // ① 查找工具并检查参数，失败时直接返回错误结果。
+  const prepared = prepareToolCall(call, toolMap);
+  if ("result" in prepared) return prepared.result;
+
+  // ② 通过检查后，执行前回调仍可以阻止这次操作。
+  const decision = await onToolCall?.({ toolCallId: id, name, args });
+  if (decision?.block) {
+    return {
+      toolCallId: id,
+      toolName: name,
+      content: `Tool "${name}" blocked by an extension: ${decision.reason ?? "no reason given"}`,
+      isError: true,
+    };
+  }
+
+  // ③ 最终由 runTool 调用对应工具的 execute，统一整理结果。
+  return prepared.run(signal);
+}
+```
+
+进入 `executeToolCall` 后，先通过 `prepareToolCall` 查找工具并检查参数，再经过执行前回调 `onToolCall`；允许执行时，才调用准备好的 `run` 函数。`prepareToolCall` 和 `runTool` 的实现分别在 2.3、2.4 节展开。
+
+调用 `read` 和 `bash` 时，都可以沿着这条流程找到对应实现，再通过统一的 `execute` 入口执行具体操作。工具怎样提供这些信息？先从接口看起。
+
+### 2.1 定义工具：统一接口包含哪些信息
+
+一个工具既要让模型知道如何使用，也要让本地知道如何执行。imp 的 `Tool` 接口将这些信息放在同一个对象里：
+
+```ts
+// 文件：src/core/tools/types.ts
+// 模块级接口定义；结果类型在此展开，省略可选的命令退出码。
+interface Tool {
+  name: string;
+  description: string;
+  parameters: TSchema;
+  concurrencySafe?: boolean;
+  execute(args: Record<string, unknown>, signal: AbortSignal): Promise<{
+    output: string;
+    isError?: boolean;
+  }>;
+}
+```
+
+前三项是工具的使用说明：
+
+- `name`：名称，模型用它指定要调用的工具。
+- `description`：用途和使用限制，帮助模型判断什么时候该用它。
+- `parameters`：输入规则，说明哪些字段必填、是什么类型。`TSchema` 是 TypeBox 库表示这些规则的类型。
+
+`execute` 是本地执行入口：接收参数和中断信号，异步返回输出与错误标记。`concurrencySafe` 则向调度方声明是否允许并发，后面再讨论。
+
+例如，`read` 的参数需要文件路径，`bash` 的参数需要命令。工具内部处理方式不同，调用方却都只需执行 `tool.execute(args, signal)`。以后增加一个工具，仍遵守这一约定，Agent 循环就不必了解它怎样操作外部环境。
+
+接口之外还需要约定行为：取消后是否停止、错误怎样返回、输出会不会过大。只让函数签名相同，还不足以保证工具可以可靠地配合运行。
+
+### 2.2 注册工具：让模型能选择，让 Agent 能执行
+
+定义好工具后，还要把它加入本次运行。imp 的 [`runner.ts`](https://github.com/FishInSalt/imp/blob/main/src/runner.ts) 负责创建工具集合，再传给 Agent 循环：
+
+```ts
+// 文件：src/runner.ts
+// 所在函数：RunnerImpl 的 constructor
+// 工具初始化：省略其他内置工具与后续 task 工具注册。
+this.tools = [
+  ...(options.tools ?? [
+    createBashTool({ cwd: options.cwd }),
+    createReadTool({ cwd: options.cwd }),
+    // 其他内置工具……
+  ]),
+  ...(options.extensions?.tools ?? []),
+];
+```
+
+这里的“注册”就是把工具对象纳入可用集合。上层可以提供自己的集合，也可以在内置工具之外追加扩展工具；扩展如何加载，留到第 08 章。
+
+在[《模型接入·上》的 2.2 节](/posts/coding-agent-02-model-protocol/#22-把工具定义转换成模型能接收的格式)中，我们看过：模型接入层从 `request.tools` 中提取工具名称、用途和参数要求，转换后放进发给模型服务的 `body.tools`。这里的工具说明，就来自刚才创建的工具集合。集合中还保存着 `execute` 函数，Agent 会在本地用它执行模型选择的工具。
+
+以 `read` 为例，看看同一个工具对象怎样用于提供说明和执行操作：
+
+<ToolDefinitionMap />
+
+模型通过工具名称指定要调用的工具，Agent 也通过这个名称查找本地实现。因此，发给模型的工具说明需要与本地注册的工具保持一致。
+
+**注册时需要注意：说明与实现是否对应，名称是否重复。**
+
+两边没有对应好，会出现两种情况：
+
+- **发出了工具说明，却没有注册对应实现**：模型可能选择这个工具，但 Agent 无法在本次运行的 `toolMap` 中找到它。
+- **注册了实现，却没有发送工具说明**：模型无法从提供的工具列表中得知这项能力。
+
+同一次运行中，工具名称还应保持唯一，否则不同实现会争用同一个查找名称。当前 imp 建立 `toolMap` 时，遇到同名工具会保留后加入的对象，覆盖前一个。如果希望在重名时直接报错，需要在注册工具时显式检查。
+
+### 2.3 调用前检查：工具执行前要检查什么
+
+模型选择了 `read` 工具，并给出了文件路径 `README.md`。执行读取之前，Agent 需要先检查：本次可用工具中有没有 `read`？它收到的参数是否符合工具定义的要求？
+
+前面的 `executeToolCall` 会将这次工具调用的 ID、名称和参数整理成 `call` 对象，再调用 `prepareToolCall(call, toolMap)` 完成检查。其中，`call` 的内容如下：
+
+```json
+{
+  "id": "t1",
+  "name": "read",
+  "arguments": { "path": "README.md" }
+}
+```
+
+`prepareToolCall` 先根据 `name` 查找工具，再用该工具声明的参数规则检查 `arguments`。下面保留检查顺序和提前返回，省略错误结果中的 ID、名称及具体错误文字：
+
+```ts
+// 文件：src/core/loop.ts
+// 错误结果只展示 isError 字段。
+function prepareToolCall(call, toolMap) {
+  const tool = toolMap.get(call.name);
+  if (!tool) {
+    return { result: { isError: true /* 未知工具 */ } };
+  }
+
+  const record = call.arguments;
+  if (typeof record !== "object" || record === null || Array.isArray(record)) {
+    return { result: { isError: true /* 参数必须是 JSON 对象 */ } };
+  }
+
+  if (!Value.Check(tool.parameters, record)) {
+    // 源码通过 Value.Errors 收集字段错误，再放入结果。
+    return { result: { isError: true /* 不符合该工具的参数规则 */ } };
+  }
+
+  return { run: (signal) => runTool(call, tool, record, signal) };
+}
+```
+
+`prepareToolCall` 找到工具后，会检查 `call.arguments` 是否符合该工具的参数规则。这里使用 TypeBox 的 `Value.Check`；校验失败时，源码还会用 `Value.Errors` 收集具体错误，节选中省略了这部分。
+
+例如，`{"path":123}` 是合法的 JSON，但 `read` 要求 `path` 为字符串，因此这个参数无法通过校验。
+
+检查结束后，`prepareToolCall` 返回两种对象之一，保存在 `executeToolCall` 的 `prepared` 变量中：
+
+- **检查失败**：返回 `{ result: ... }`，其中包含错误结果，调用方直接返回该结果。
+- **检查通过**：返回 `{ run: ... }`，其中的 `run` 函数用于后续执行工具。**此时只是准备好了 `run` 函数，工具还没有执行。**
+
+参数检查通过后，工具还不会立即执行。`executeToolCall` 留出了一个执行前钩子 `onToolCall`，让调用方可以加入自己的处理，例如检查访问权限，或等待用户审批。权限检查和审批逻辑需要由接入方实现，具体会在第 07 章展开。
+
+到这里，可以把一次工具调用涉及的检查归纳如下：
+
+| 所在位置              | 检查内容                               | 例子                                 |
+| --------------------- | -------------------------------------- | ------------------------------------ |
+| `prepareToolCall`     | 工具是否存在、参数结构和类型是否正确   | 能否找到 `read`，`path` 是否为字符串 |
+| `onToolCall` 回调     | 本次操作是否允许执行                   | 是否允许读取指定位置                 |
+| 工具的 `execute` 实现 | 具体参数是否可用，以及实际操作能否完成 | 路径是否为空白、读取时文件是否存在   |
+
+### 2.4 执行与反馈：怎样把输出或错误交回 Agent 循环
+
+检查通过后，`prepared.run` 进入 `runTool`。这里才调用工具实现，并把工具输出整理成 Agent 循环使用的结果：
+
+```ts
+// 文件：src/core/loop.ts
+// 省略参数类型。
+async function runTool(call, tool, record, signal) {
+  try {
+    const result = await tool.execute(
+      record, signal ?? new AbortController().signal
+    );
+    return {
+      toolCallId: call.id,
+      toolName: call.name,
+      content: result.output,
+      isError: result.isError ?? false,
+    };
+  } catch (err) {
+    return {
+      toolCallId: call.id,
+      toolName: call.name,
+      content: `Error: tool ${call.name} threw: ${err instanceof Error ? err.message : String(err)}`,
+      isError: true,
+    };
+  }
+}
+```
+
+这里可以看到两份结果的分工：
+
+- **工具实现返回** `output` 和可选的 `isError`，描述本次操作的输出。
+- **调用层补上** `toolCallId`、`toolName`，把输出放入 `content`，使结果与原工具调用对应。
+
+无论工具主动返回失败，还是执行函数抛出异常，调用方都能拿到相同结构的结果。参数校验失败、执行前被拒绝时，工具虽然没有真正执行，调用层也会返回同样结构的结果。因此，Agent 循环可以统一收集这些结果并写入历史；具体失败原因则保存在 `content` 中。
+
+接着看 Agent 循环怎样将这些结果写入历史：
+
+```ts
+// 文件：src/core/loop.ts
+// 所在函数：runAgentLoop
+// 节选：省略类型、中断后的结果补齐、结束判断与消息通知。
+const results = [];
+await executeToolBatch(
+  toolCalls, toolMap, signal, onToolCall, onEvent, results
+);
+
+// ……省略中断后的结果补齐与结束判断。
+const toolResults = { role: "toolResult", results };
+history.push(toolResults);
+```
+
+`executeToolBatch` 将各次调用的结果收集到 `results` 中，Agent 循环再把它们放进一条 `toolResult` 消息，写入 `history`。下一次调用模型时，模型接入层会将这条消息转换成服务要求的格式，具体过程见第 02 章。
+
+统一结果格式时，也要保留判断操作结果所需的信息，例如命令的退出码和测试输出，不能只凭 `isError` 判断测试是否通过。输出过长时，还需要给出截断提示和继续获取内容的方法；上下文的选择与压缩留到第 04 章展开。
+
+调用层还会通过 `tool_start`、`tool_end` 通知交互层更新执行状态，具体展示方式留到第 06 章。
+
+### 2.5 工具调度：多个调用怎样安排执行
+
+把前面的任务稍作扩展：**“读取 README.md 和 package.json，告诉我项目怎样启动。”** 假设模型在一条回复里给出了两次 `read` 调用。两次读取不需要彼此的结果，如果文件没有被同时修改，就可以一起执行，等两份内容都返回后再交给模型。
+
+但“修改启动脚本，再运行测试”就有先后关系：测试必须在修改完成后执行。如果测试命令还需要根据修改结果决定，就应该先把修改结果交回模型，再由模型发起下一次调用。**模型一次给出多个工具调用，并不代表它们都可以同时执行。**
+
+**当前 imp 怎样安排执行**
+
+沿用前面的例子，模型在一条回复中同时要求读取 `README.md` 和 `package.json`。Agent 循环取出这两次工具调用后，会交给 `executeToolBatch`，由它决定是依次执行，还是并发执行。
+
+这个函数位于 [`loop.ts`](https://github.com/FishInSalt/imp/blob/main/src/core/loop.ts)。它读取每个工具的 `concurrencySafe` 标记，先确定执行方式：
+
+| 工具的标记                               | 执行方式                                                |
+| ---------------------------------------- | ------------------------------------------------------- |
+| 未声明 `concurrencySafe`，或值为 `false` | 串行执行：等待当前调用结束，再处理下一个。              |
+| `concurrencySafe: true`                  | 将连续符合条件的调用分组，每批最多 5 个，分批并发执行。 |
+
+当前 `read`、`bash` 都没有声明这个标记，因此仍串行执行。遇到串行调用时，前面的并发批次必须先完成；串行调用结束后，才能继续处理后面的调用。
+
+对于一个并发批次，`executeToolBatch` 会交给 `executeChunk` 处理，整个过程如下：
+
+1. **逐个检查**：`executeChunk` 按调用顺序检查参数，检查通过后调用执行前钩子 `onToolCall`。
+2. **同时执行**：通过参数检查且未被钩子拦截的调用一起启动；检查失败或被拦截的调用只保留错误结果。
+3. **收集结果**：等待整批完成，再按原调用顺序保存结果、发送 `tool_end`，不会按完成先后打乱排列。
+4. **继续下一批**：当前批次处理完后，`executeToolBatch` 才启动下一批。
+
+目前内置工具中，只有用于委派子代理任务的 [`task`](https://github.com/FishInSalt/imp/blob/main/src/core/tools/task.ts) 显式设置了 `concurrencySafe: true`。它的说明要求只委派相互独立的任务；这个标记本身不会检查两个子代理是否修改了同一个文件。这里的 5 是当前调度批次的上限，也不是整个系统中所有子代理和工具调用的全局上限。
+
+**当前设计的取舍与局限**
+
+作为起步方案，默认串行、显式开启并发是合理的：执行顺序容易追踪，新增工具也不会未经确认就参与并发；分批执行还能限制单批资源消耗。不过，它有两处明显的取舍：
+
+- **判断粒度较粗。** 标记附在工具上，但冲突发生在具体调用之间。两个独立的 `read` 仍会串行执行，而两个 `task` 即使操作同一份文件，也可能同时启动。前者损失一些效率，后者需要额外的资源约束。
+- **批次会等待最慢的调用。** 假设第一批中 4 个调用很快结束，剩下 1 个很慢，第 6 个调用仍要等待；已经完成的结果也要等整批结束才通过 `tool_end` 通知界面。
+
+因此，可以保留默认串行的做法，但不能把 `concurrencySafe` 当作已经解决了依赖和冲突。是否需要更复杂的调度，要看实际等待时间和冲突情况。
+
+**更完整的工具调度需要考虑什么**
+
+`concurrencySafe` 解决的是“哪些工具允许并发”的初步判断。要进一步安排好多个工具调用，需要一套工具调度系统：**接收一组工具调用，决定它们何时执行，最后收集每次调用的结果。目标是在满足执行约束的前提下，尽量减少等待。** 工具输出是否正确，还取决于工具实现和传入参数，不能只靠调度保证。
+
+设计这套系统，需要考虑以下几个方面：
+
+- **调用依赖**：哪些调用可以独立执行，哪些必须等待前面的结果？前一步失败后，后续调用是否继续？
+- **资源冲突**：多个调用是否会同时读写同一文件，或操作同一个外部资源？发生冲突时，如何安排顺序？
+- **并发额度**：同时执行多少个调用，才能兼顾速度、资源消耗和服务限流？
+- **执行控制**：调用开始前怎样检查参数和权限，执行过程中怎样处理取消、超时与失败？
+- **结果交付**：怎样将结果与原调用对应，及时反馈执行状态，并完整保留成功、失败或取消的结果？
+
+当前 imp 通过并发标记和固定批次实现了基础调度，还没有根据具体调用的依赖与资源冲突来安排执行。后续是否扩展这些能力，可以结合实际任务的复杂度逐步决定。
+
+## 3. 两个工具，怎样接入同一套系统
+
+第 2 节的调用流程最终走到 `tool.execute(args, signal)`。接下来打开两个工具的实现，看看它们怎样接住参数和中断信号，又怎样把结果交回来。
+
+### 3.1 read：接收路径，返回文件内容
+
+下面节选自 [`read.ts`](https://github.com/FishInSalt/imp/blob/main/src/core/tools/read.ts)。保留工具定义、路径检查、读取操作和返回结果；缩短了工具说明，省略 `offset`、`limit` 参数及内容裁剪细节。注释标出了省略位置，代码不能单独运行。
+
+```ts
+// 文件：src/core/tools/read.ts
+// 模块级参数定义；下方为创建工具的函数。
+const readSchema = Type.Object({
+  path: Type.String({ description: "Path to the file to read (relative or absolute)" }),
+  // 省略 offset、limit 两个可选参数。
+});
+
+export function createReadTool(options: ReadToolOptions = {}): Tool {
+  const cwd = options.cwd ?? process.cwd();
+  return {
+    name: "read",
+    description: "Read the contents of a text file.", // 缩短后的说明
+    parameters: readSchema,
+    async execute(args, signal) {
+      const requested = String(args.path ?? "");
+      if (requested.trim() === "") {
+        return { output: "Error: no path given", isError: true };
+      }
+      const absolute = path.resolve(cwd, requested);
+
+      let bytes: Buffer;
+      try {
+        // 把调用层传来的中断信号继续交给文件读取操作。
+        bytes = await readFile(absolute, { signal });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return { output: `Error reading ${requested}: ${message}`, isError: true };
+      }
+
+      // 省略二进制检查、解码、行范围检查与裁剪。
+      // 这些代码从 bytes 得到 selected（正文）和 notes（裁剪说明）。
+      const output = notes.length > 0 ? `${selected}\n\n${notes.join("\n")}` : selected;
+      return { output, isError: false };
+    },
+  };
+}
+```
+
+沿着“读取 README”的请求看这段代码：
+
+1. `parameters` 告诉模型需要提供 `path`，也让调用层可以检查它是不是字符串。
+2. `execute` 继续检查字符串是否为空，并按工具创建时的工作目录解析路径。这些属于读取工具自己的规则。
+3. `readFile` 执行读取，接收同一个 `signal`；读取失败时，工具把错误原因放进 `output`。
+4. 成功时返回文件内容和 `isError: false`。工具不用填写调用 ID，也不用直接修改 `history`，这些由前面的调用层和 Agent 循环完成。
+
+因此，`parameters` 和 `execute` 各自负责一部分检查：前者描述参数结构，后者处理“这个路径能不能读取”等实际操作中的问题。
+
+### 3.2 bash：把进程事件转换成工具结果
+
+运行测试需要等待命令启动、输出内容、最后退出。虽然过程比读取文件复杂，对调用层来说，仍然是等待 `execute` 返回一个结果。
+
+下面节选自 [`bash.ts`](https://github.com/FishInSalt/imp/blob/main/src/core/tools/bash.ts)，先看正常执行和启动失败的路径。工具说明已缩短，超时、取消和输出缓冲的实现省略；其中 `finish` 是源码里的收尾函数，负责防止重复返回、清理超时计时器与中断监听器，最后调用 `resolve(result)`。
+
+```ts
+// 文件：src/core/tools/bash.ts
+// 模块级参数定义；下方为创建工具的函数。
+const bashSchema = Type.Object({
+  command: Type.String({ description: "Bash command to execute" }),
+  // 省略可选的 timeout 参数。
+});
+
+export function createBashTool(options: BashToolOptions = {}): Tool {
+  const cwd = options.cwd ?? process.cwd();
+  return {
+    name: "bash",
+    description: `Execute a bash command in the working directory (${cwd}) and return stdout/stderr.`,
+    parameters: bashSchema,
+    async execute(args, signal): Promise<ToolExecuteResult> {
+      const command = String(args.command ?? "");
+      if (command.trim() === "") {
+        return { output: "Error: empty command", isError: true };
+      }
+      // 省略 timeout 参数检查。
+      return new Promise<ToolExecuteResult>((resolve) => {
+        const child = spawn("/bin/bash", ["-c", command], {
+          cwd,
+          env: { ...process.env, IMP: "1" },
+        });
+        const stdout = newState();
+        const stderr = newState();
+        // 省略计时器、signal 监听和 finish 的定义；下方单独看取消逻辑。
+
+        // 收集命令输出，尚未向调用层交付最终结果。
+        child.stdout.on("data", (chunk: Buffer) => appendChunk(stdout, chunk.toString("utf8")));
+        child.stderr.on("data", (chunk: Buffer) => appendChunk(stderr, chunk.toString("utf8")));
+        child.on("error", (err) => {
+          finish({ output: `Error: failed to spawn command: ${err.message}`, isError: true });
+        });
+        child.on("close", async (code) => {
+          // 源码先处理超时和取消：返回错误及已有输出，并提前结束。
+          // 这里省略这两个分支，只保留正常退出路径。
+          const output = await formatOutput(stdout, stderr, command, code ?? undefined);
+          finish({ output, isError: false, exitCode: code ?? undefined });
+        });
+      });
+    },
+  };
+}
+```
+
+`spawn` 启动命令后，输出和退出通知会陆续到达。这里用一个 Promise 把这些事件接起来：`data` 事件收集输出，`error` 或 `close` 事件进入收尾逻辑，再通过 `finish` 交付结果。调用层不需要知道进程事件的细节，只需等待这个 Promise。
+
+`formatOutput` 负责整理标准输出、标准错误和退出状态。注意正常退出路径中的 `isError: false`：在当前 imp 中，它不能保证命令执行成功。非零退出码会写进 `output`，工具也额外返回 `exitCode`；第 2.4 节的通用包装只取 `output` 和 `isError`，因此模型要从输出中判断测试是否通过。
+
+再看刚才省略的中断监听，它位于同一个 Promise 内部：
+
+```ts
+// 文件：src/core/tools/bash.ts
+// 所在函数：createBashTool 返回的工具对象的 execute 方法
+// 位于 new Promise 的回调内，注册取消监听。
+let aborted = false;
+const onAbort = () => {
+  aborted = true; // close 分支据此返回取消结果。
+  child.kill("SIGTERM");
+  setTimeout(() => child.kill("SIGKILL"), KILL_GRACE_MS).unref();
+};
+signal.addEventListener("abort", onAbort, { once: true });
+```
+
+`read` 可以把信号直接交给 `readFile`；这里的 `bash` 则自己监听信号，先请求子进程终止，再安排强制终止。源码中的宽限时间是 2 秒。这里操作的是启动的子进程，不能据此认为它创建的所有后代进程都已停止。
+
+### 3.3 对照两个实现，哪些工作留在工具内部
+
+| 接口约定 | read 的实现            | bash 的实现                    |
+| -------- | ---------------------- | ------------------------------ |
+| 描述参数 | 文件路径，可选的行范围 | 命令，可选的超时时间           |
+| 执行操作 | 读取文件，整理正文     | 启动进程，收集输出与退出状态   |
+| 响应取消 | 把信号传给文件读取 API | 监听信号，向子进程发送终止信号 |
+| 返回结果 | 文件内容或读取错误     | 命令输出、退出状态或运行错误   |
+
+两者都通过 `name`、`description`、`parameters` 描述能力，通过 `execute(args, signal)` 执行操作并返回结果。新增工具时，把这几项约定接好，就能复用第 2 节的查找、参数校验和结果包装流程。工具内部仍要负责实际操作、资源清理和具体错误原因。
+
+## 4. 异常处理：调用失败或中断后怎么办
+
+工具调用返回结果时，实际操作可能还没有开始，也可能已经执行但失败了；如果中途取消或超时，还需要确认操作是否真的停止。下面分别看这三种情况，以及结果应当告诉模型哪些信息。
+
+### 4.1 工具没有执行：怎样说明拒绝原因
+
+模型调用 `read` 时传入了 `{"path":123}`，读取还没开始，就在参数检查时被拒绝。此时只返回“执行失败”，模型无法知道该改什么；结果需要指出哪个参数不符合什么要求。
+
+第 2.3 节省略了错误详情的构造。下面补上 `prepareToolCall` 中的这段代码，保留字段错误和调用标识，省略前后的其他检查：
+
+```ts
+// 文件：src/core/loop.ts
+// 所在函数：prepareToolCall
+// 节选：参数不符合工具规则时，构造错误结果；省略类型断言。
+if (!Value.Check(tool.parameters, record)) {
+  const issues = [...Value.Errors(tool.parameters, record)]
+    .slice(0, 5)
+    .map((e) => `${e.instancePath || "(root)"}: ${e.message}`)
+    .join("; ");
+  return {
+    result: {
+      toolCallId: call.id,
+      toolName: call.name,
+      content: `Error: invalid arguments for ${call.name} — ${issues}. Fix the arguments and retry.`,
+      isError: true,
+    },
+  };
+}
+```
+
+`Value.Errors` 提供校验详情，这里最多取 5 条，将字段位置和错误原因写入 `content`。模型接下来才能根据反馈，把 `path` 改成字符串后重新发起调用。错误文字中的“retry”只是给模型的提示，这段代码本身不会重新执行工具。
+
+其他拒绝也应给出对应原因：未知工具时，说明错误名称和可用工具；权限或审批未通过时，说明操作受到什么限制。参数可以修正，但权限拒绝不意味着换一种参数就能继续执行。
+
+### 4.2 工具执行失败：怎样返回具体原因
+
+工具开始执行后，可能遇到文件不存在、没有读取权限或命令执行失败。结果应保留具体原因，帮助模型判断是需要修正路径、向用户说明权限限制，还是根据命令输出继续排查。
+
+第 3.1 节的 `read` 会将读取错误写入 `output`；第 3.2 节的 `bash` 会返回命令输出和退出状态。对于工具抛出的异常，第 2.4 节的 `runTool` 会捕获并整理成错误结果，这里不再重复代码。
+
+执行失败不代表操作完全没有生效；如果需要再次执行，应先确认上一次调用是否已经产生修改。
+
+### 4.3 工具被取消或超时：实际操作是否停止
+
+如果测试迟迟没有结束，用户可能取消，也可能由工具在达到超时时间后停止。第 3.2 节已经展示 `bash` 如何响应用户中断；下面补上同一个 `execute` 方法里的超时处理。`timeoutSec` 来自工具参数，未设置时不创建超时计时器：
+
+```ts
+// 文件：src/core/tools/bash.ts
+// 所在函数：createBashTool 返回的工具对象的 execute 方法
+// 位于 new Promise 的回调内；省略进程创建和后续收尾代码。
+const timer =
+  timeoutSec !== undefined
+    ? setTimeout(() => {
+        timedOut = true; // close 事件中据此返回超时原因和已有输出。
+        child.kill("SIGTERM");
+        setTimeout(() => child.kill("SIGKILL"), KILL_GRACE_MS).unref();
+      }, timeoutSec * 1000)
+    : undefined;
+```
+
+到期后，这段代码会向子进程发送终止信号，而不只是停止等待 Promise。后续 `close` 处理会返回超时原因和已经收集的输出，`finish` 则清理计时器与中断监听器。和第 3.2 节的取消处理一样，这里终止的是直接启动的子进程，不能据此保证所有后代进程都已停止。
+
+当前 imp 的通用工具接口没有统一的超时字段，`bash` 在内部处理自己的超时。无论取消或超时由谁触发，都需要让实际操作响应停止要求，并在结果中说明中断原因；仅让界面停止显示，后台操作仍可能继续。
+
+即使操作已经停止，之前写入的内容也不会自动恢复。**取消或超时都不等于回滚**，再次执行前仍要确认已有修改。
+
+## 5. 工具接入之后，下一次给模型看什么
+
+回到读取 README 的任务，文件内容已经作为工具结果写入历史，模型可以据此回答怎样启动项目。但任务继续推进时，Agent 可能还会读取更多文件、运行测试，历史中也会不断增加代码和日志。下一次调用模型，应该带上哪些内容，哪些可以省略或压缩？第 04 章接着讨论上下文管理。
