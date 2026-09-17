@@ -26,8 +26,8 @@ export const codingAgentChapters = [
   },
   {
     number: "03",
-    title: "工具系统",
-    question: "怎样可靠地搜索、读写文件和执行命令？",
+    title: "工具系统：定义、调用与反馈",
+    question: "怎样通过统一接口接入工具、执行请求并返回结果？",
     postId: "coding-agent-03-tools",
   },
   {
