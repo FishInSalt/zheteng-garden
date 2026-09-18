@@ -32,7 +32,7 @@ export const codingAgentChapters = [
   },
   {
     number: "04",
-    title: "上下文管理",
+    title: "上下文管理：信息组织与历史压缩",
     question: "每次给模型什么信息，内容过长时怎么办？",
     postId: "coding-agent-04-context",
   },

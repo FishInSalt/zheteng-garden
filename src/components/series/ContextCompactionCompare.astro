@@ -1,0 +1,387 @@
+---
+import "./series-visual.css";
+
+const olderMessages = [
+  {
+    id: "M1",
+    role: "用户任务",
+    text: "修复求和函数，不改公共接口，并运行测试。",
+  },
+  {
+    id: "M2",
+    role: "模型调用工具",
+    text: "读取 src/sum.ts 和 tests/sum.test.ts。",
+  },
+  {
+    id: "M3",
+    role: "工具结果",
+    text: "返回源码与测试：求和函数中存在字符串拼接。",
+  },
+  { id: "M4", role: "模型调用工具", text: "调用 bash，运行 npm test。" },
+  { id: "M5", role: "工具结果", text: "sum(2, 3) 预期为 5，实际返回 23。" },
+  {
+    id: "M6",
+    role: "模型调用工具",
+    text: "调用 edit，修改求和逻辑，保留函数签名。",
+  },
+  { id: "M7", role: "工具结果", text: "src/sum.ts 修改成功。" },
+];
+const recentMessages = [
+  {
+    id: "M8",
+    role: "模型调用工具",
+    text: "调用 bash，运行 npm test；调用 ID：t7。",
+  },
+  {
+    id: "M9",
+    role: "工具结果",
+    text: "t7：普通用例通过；sum(-2, 3) 预期为 1，实际为 5。",
+  },
+];
+const summary = [
+  { label: "目标与约束", text: "修复求和函数，保持公共接口不变。" },
+  {
+    label: "已完成",
+    text: "已读取 src/sum.ts 与 tests/sum.test.ts，发现字符串拼接问题，并修改了函数。",
+  },
+  {
+    label: "待验证",
+    text: "修改后的函数是否通过测试，需要根据后续测试结果判断。",
+  },
+];
+---
+
+<figure
+  class="context-compaction-compare series-visual not-prose"
+  aria-labelledby="compaction-compare-title"
+>
+  <p class="figure-title" id="compaction-compare-title">
+    沿着同一组消息，看一次历史压缩
+  </p>
+  <p class="note">
+    教学示例：消息只展示正文要点，摘要为人工示意。M1–M9
+    是图中的消息标记，压缩是否触发取决于长度，而不是消息条数。
+  </p>
+  <div class="walkthrough">
+    <section class="before" aria-label="压缩前的九条消息与切分位置">
+      <h4 id="compaction-before">
+        <span class="step">1</span> 压缩前：9 条历史消息
+      </h4>
+      <p class="group-label old-label">较早的 7 条 · 待生成摘要</p>
+      <ol class="messages older">
+        {
+          olderMessages.map(message => (
+            <li>
+              <span class="message-id">{message.id}</span>
+              <div>
+                <>
+                  <span class="role">{message.role}</span>
+                  <p>{message.text}</p>
+                </>
+              </div>
+            </li>
+          ))
+        }
+      </ol>
+      <div class="cut">
+        <h4 id="compaction-cut"><span class="step">2</span> 在 M8 前切分</h4>
+        <p>假设本次得到 <code>cut = 7</code></p>
+      </div>
+      <p class="group-label recent-label">近期的 2 条 · 保留原文</p>
+      <ol class="messages recent">
+        {
+          recentMessages.map(message => (
+            <li>
+              <span class="message-id">{message.id}</span>
+              <div>
+                <>
+                  <span class="role">{message.role}</span>
+                  <p>{message.text}</p>
+                </>
+              </div>
+            </li>
+          ))
+        }
+      </ol>
+      <p class="pair-note">M8 发起测试，M9 返回结果，两条消息一起保留。</p>
+    </section>
+    <div class="transfer" aria-hidden="true">→</div>
+    <div class="after">
+      <section class="summarize" aria-label="较早的七条消息生成摘要">
+        <h4 id="compaction-summary">
+          <span class="step">3</span> M1–M7 生成一条摘要
+        </h4>
+        <p class="action">
+          只把这 7 条消息交给模型，要求总结任务、进展和后续工作。
+        </p>
+        <div class="summary">
+          <strong><span class="message-id">S</span> 生成的摘要</strong>
+          <dl>
+            {
+              summary.map(item => (
+                <>
+                  <>
+                    <dt>{item.label}</dt>
+                    <dd>{item.text}</dd>
+                  </>
+                </>
+              ))
+            }
+          </dl>
+        </div>
+        <p class="summary-note">
+          M8、M9 不参与摘要。摘要此时还不知道最新的负数测试失败了。
+        </p>
+      </section>
+      <p class="merge-arrow">
+        <span aria-hidden="true">↓</span> 摘要生成成功，与近期原文重新组合
+      </p>
+      <section class="next" aria-label="下一次调用中的三条消息">
+        <h4 id="compaction-after">
+          <span class="step">4</span> 新历史：摘要 + M8 + M9
+        </h4>
+        <ol class="messages rebuilt">
+          <li class="summary-reference">
+            <span class="message-id">S</span>
+            <div>
+              <span class="role">带摘要标记的消息</span><p>
+                上方生成的摘要，交代原任务与此前进展。
+              </p>
+            </div>
+          </li>
+          {
+            recentMessages.map(message => (
+              <li class="kept">
+                <span class="message-id">{message.id}</span>
+                <div>
+                  <>
+                    <span class="role">{message.role} · 原文保留</span>
+                    <p>{message.text}</p>
+                  </>
+                </div>
+              </li>
+            ))
+          }
+        </ol>
+        <div class="request">
+          <strong>交给下一次模型调用</strong>
+          <p><code>messages = [S, M8, M9]</code></p>
+          <p><code>system</code> 与 <code>tools</code> 仍按原来的方式提供。</p>
+        </div>
+      </section>
+    </div>
+  </div>
+  <figcaption>
+    9 条消息变成 3
+    条，只说明本例的组成变化，不代表固定压缩比例。调用方更新的是本次模型输入，原始会话记录仍然保留。
+  </figcaption>
+</figure>
+
+<style>
+  .context-compaction-compare {
+    container-type: inline-size;
+    margin: 1.75rem 0;
+    color: var(--series-ink);
+    font-size: 0.85rem;
+    line-height: 1.65;
+  }
+  .figure-title {
+    font-size: 1rem;
+    font-weight: 700;
+    margin: 0 0 0.4rem;
+  }
+  .note,
+  figcaption {
+    color: var(--series-secondary);
+    font-size: 0.78rem;
+  }
+  .note {
+    margin: 0 0 1.25rem;
+  }
+  .walkthrough {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 1.8rem minmax(0, 1fr);
+    align-items: start;
+    gap: 0.3rem;
+  }
+  .before,
+  .after,
+  .summarize,
+  .next {
+    min-width: 0;
+  }
+  h4 {
+    display: flex;
+    align-items: baseline;
+    gap: 0.45rem;
+    margin: 0 0 0.7rem;
+    font: inherit;
+    font-weight: 700;
+    font-size: 0.95rem;
+  }
+  .step {
+    flex-shrink: 0;
+    display: inline-flex;
+    justify-content: center;
+    align-items: center;
+    width: 1.35rem;
+    height: 1.35rem;
+    border: 1px solid var(--series-rule);
+    border-radius: 50%;
+    color: var(--series-blue);
+    font-size: 0.76rem;
+  }
+  p {
+    margin: 0;
+    overflow-wrap: anywhere;
+  }
+  code {
+    font-size: 0.78rem;
+    overflow-wrap: anywhere;
+  }
+  .group-label {
+    margin: 0 0 0.5rem;
+    font-size: 0.78rem;
+  }
+  .old-label {
+    color: var(--series-blue);
+  }
+  .recent-label {
+    color: var(--series-feedback);
+  }
+  .messages {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    border: 1px solid var(--series-rule);
+    border-radius: 0.3rem;
+    overflow: hidden;
+    background: var(--series-paper);
+  }
+  .messages li {
+    display: grid;
+    grid-template-columns: 1.55rem minmax(0, 1fr);
+    gap: 0.45rem;
+    padding: 0.65rem 0.7rem;
+  }
+  .messages li + li {
+    border-top: 1px solid var(--series-rule);
+  }
+  .message-id {
+    color: var(--series-blue);
+    font-size: 0.76rem;
+    font-weight: 700;
+  }
+  .role {
+    display: block;
+    font-size: 0.72rem;
+    color: var(--series-secondary);
+    margin-bottom: 0.15rem;
+  }
+  .older {
+    border-left: 3px solid var(--series-blue);
+  }
+  .recent {
+    border-color: var(--series-feedback);
+    border-left-width: 3px;
+  }
+  .recent .message-id,
+  .kept .message-id {
+    color: var(--series-feedback);
+  }
+  .cut {
+    margin: 0.85rem 0;
+    padding: 0.65rem 0;
+    border-top: 2px dashed var(--series-blue);
+    border-bottom: 1px dashed var(--series-rule);
+  }
+  .cut h4 {
+    margin-bottom: 0.15rem;
+  }
+  .cut p {
+    padding-left: 1.8rem;
+    font-size: 0.78rem;
+    color: var(--series-secondary);
+  }
+  .pair-note {
+    color: var(--series-feedback);
+    font-size: 0.78rem;
+    margin-top: 0.5rem;
+  }
+  .transfer {
+    text-align: center;
+    font-size: 1.3rem;
+    color: var(--series-blue);
+    padding-top: 5rem;
+  }
+  .action {
+    margin-bottom: 0.65rem;
+  }
+  .summary {
+    padding: 0.85rem;
+    border: 1px solid var(--series-blue);
+    border-radius: 0.3rem;
+    background: var(--series-blue-wash);
+  }
+  .summary > strong {
+    display: flex;
+    gap: 0.55rem;
+    align-items: baseline;
+  }
+  dl {
+    margin: 0;
+  }
+  dt {
+    font-weight: 600;
+    margin-top: 0.65rem;
+  }
+  dd {
+    margin: 0.15rem 0 0;
+  }
+  .summary-note {
+    margin-top: 0.6rem;
+    color: var(--series-secondary);
+    font-size: 0.78rem;
+  }
+  .merge-arrow {
+    color: var(--series-secondary);
+    text-align: center;
+    margin: 1rem 0;
+    font-size: 0.78rem;
+  }
+  .summary-reference {
+    background: var(--series-blue-wash);
+    border-left: 3px solid var(--series-blue);
+  }
+  .kept {
+    border-left: 3px solid var(--series-feedback);
+  }
+  .request {
+    margin-top: 0.7rem;
+    border-top: 1px solid var(--series-rule);
+    padding-top: 0.7rem;
+  }
+  .request p {
+    margin-top: 0.3rem;
+  }
+  figcaption {
+    margin-top: 1rem;
+  }
+  @container (max-width: 620px) {
+    .walkthrough {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 0;
+    }
+    .transfer {
+      font-size: 0;
+      padding: 0.75rem 0;
+    }
+    .transfer::after {
+      content: "↓";
+      font-size: 1.3rem;
+    }
+    .after {
+      margin-top: 0.15rem;
+    }
+  }
+</style>
