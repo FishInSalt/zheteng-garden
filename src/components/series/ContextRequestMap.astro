@@ -1,0 +1,126 @@
+---
+import "./series-visual.css";
+const rows = [
+  {
+    field: "system",
+    source: "Agent 内置提示词、运行环境信息、项目约定文件（如 AGENTS.md）",
+    content: "工作要求、当前工作目录、项目的编码与测试约定",
+  },
+  {
+    field: "messages",
+    source: "用户输入、模型回复、工具执行结果，以及历史压缩生成的摘要",
+    content: "用户任务、读取到的代码、工具调用记录、测试输出、历史摘要",
+  },
+  {
+    field: "tools",
+    source: "本次运行注册的工具对象",
+    content: "工具名称、用途、参数规则和本地执行函数",
+  },
+];
+---
+
+<figure
+  class="context-request-map series-visual not-prose"
+  aria-labelledby="context-map-title"
+>
+  <p id="context-map-title" class="figure-title">
+    imp 上下文字段的内容来源与常见内容
+  </p>
+  <div
+    class="table-scroll"
+    tabindex="0"
+    role="region"
+    aria-label="上下文字段对照表，可横向滚动"
+  >
+    <table aria-labelledby="context-map-title">
+      <thead>
+        <tr>
+          <th scope="col">字段</th>
+          <th scope="col">内容来源</th>
+          <th scope="col">常见内容</th>
+        </tr>
+      </thead>
+      <tbody>
+        {
+          rows.map(row => (
+            <tr>
+              <th scope="row">
+                <code>{row.field}</code>
+              </th>
+              <td>{row.source}</td>
+              <td>{row.content}</td>
+            </tr>
+          ))
+        }
+      </tbody>
+    </table>
+  </div>
+  <figcaption>
+    工具对象中的执行函数留在本地；模型接入层只把工具名称、用途和参数规则发送给模型。
+  </figcaption>
+</figure>
+<style>
+  .context-request-map {
+    margin: 1.75rem 0;
+    color: var(--series-ink);
+    font-size: 0.85rem;
+    line-height: 1.65;
+  }
+  .figure-title {
+    font-size: 1rem;
+    font-weight: 700;
+    margin: 0 0 1rem;
+  }
+  .table-scroll {
+    overflow-x: auto;
+    border: 1px solid var(--series-rule);
+    border-radius: 0.4rem;
+  }
+  .table-scroll:focus-visible {
+    outline: 2px solid var(--series-blue);
+    outline-offset: 3px;
+  }
+  table {
+    width: 100%;
+    min-width: 32rem;
+    border-collapse: collapse;
+    text-align: left;
+    background: var(--series-paper);
+  }
+  th,
+  td {
+    padding: 0.85rem;
+    vertical-align: top;
+  }
+  thead {
+    background: var(--series-canvas);
+  }
+  th {
+    font-weight: 600;
+  }
+  tbody tr {
+    border-top: 1px solid var(--series-rule);
+  }
+  th + th,
+  th + td,
+  td + td {
+    border-left: 1px solid var(--series-rule);
+  }
+  tbody th {
+    width: 6.5rem;
+    background: var(--series-blue-wash);
+  }
+  tbody td:first-of-type {
+    width: 32%;
+  }
+  code {
+    color: var(--series-blue);
+    background: transparent;
+    padding: 0;
+  }
+  figcaption {
+    margin-top: 0.7rem;
+    color: var(--series-secondary);
+    font-size: 0.78rem;
+  }
+</style>
