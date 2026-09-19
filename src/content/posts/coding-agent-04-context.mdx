@@ -1,6 +1,7 @@
 ---
 author: 折腾怪
 pubDatetime: 2026-09-18T12:35:28Z
+modDatetime: 2026-09-19T15:54:45Z
 title: "Coding Agent 原理与实践 04：上下文管理：信息组织与历史压缩"
 featured: false
 draft: false
@@ -90,7 +91,7 @@ if (!this.options.noContextFiles) {
 
 `buildSystemPrompt` 提供基础指令和运行环境；`loadContextFiles` 读取项目约定。当前实现先查找 `~/.imp/AGENTS.md`，再从根目录到工作目录依次查找沿途的 `AGENTS.md`，把找到的内容拼接起来。因此，用户可以在项目根目录添加 `AGENTS.md`，写明编码规范、测试方式等要求，供 Agent 执行任务时遵循。
 
-这些约定由用户或项目维护者编写，Agent 负责加载；规则冲突和信任边界留到第 07 章讨论。
+这些约定由用户或项目维护者编写，Agent 负责加载；规则冲突和信任边界留到第 08 章讨论。
 
 `messages` 对应 Agent 循环使用的消息历史数组 `history`。
 

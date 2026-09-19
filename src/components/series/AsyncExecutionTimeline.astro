@@ -1,0 +1,179 @@
+---
+import "./series-visual.css";
+---
+
+<figure
+  class="async-timeline series-visual not-prose"
+  aria-labelledby="async-timeline-title"
+>
+  <p id="async-timeline-title" class="figure-title">
+    等待模型回复时，Agent 仍能处理输入
+  </p>
+  <p class="reading-hint">按 T1 → T2 → T3 阅读 · 每个时间点对照两列状态</p>
+  <div class="lanes">
+    <div class="lane-title">本地 Agent</div>
+    <div aria-hidden="true"></div>
+    <div class="lane-title">模型服务</div>
+
+    <div class="time-point"><strong>T1</strong><span>发出模型请求</span></div>
+    <div class="step">
+      <strong>发起模型调用</strong>
+      <span>等待回复的函数暂停</span>
+    </div>
+    <div class="connector" aria-label="请求发往模型服务">→</div>
+    <div class="step service">
+      <strong>收到请求</strong>
+      <span>开始生成回复</span>
+    </div>
+
+    <div class="continuation" aria-hidden="true">↓</div>
+    <div aria-hidden="true"></div>
+    <div class="continuation" aria-hidden="true">↓</div>
+
+    <div class="time-point">
+      <strong>T2</strong><span>等待期间，用户输入到达</span>
+    </div>
+    <div class="step input">
+      <span class="event-label">用户输入到达</span>
+      <strong>执行输入处理函数</strong>
+      <span>处理已收到的用户操作</span>
+    </div>
+    <div aria-hidden="true"></div>
+    <div class="step waiting">
+      <strong>仍在生成</strong>
+      <span>本次等待尚未结束</span>
+    </div>
+
+    <div class="continuation" aria-hidden="true">↓</div>
+    <div aria-hidden="true"></div>
+    <div class="continuation" aria-hidden="true">↓</div>
+
+    <div class="time-point"><strong>T3</strong><span>模型返回内容</span></div>
+    <div class="step reply">
+      <span class="event-label">模型内容到达</span>
+      <strong>继续处理模型回复</strong>
+      <span>等待结果的代码恢复执行</span>
+    </div>
+    <div class="connector" aria-label="模型服务返回内容">←</div>
+    <div class="step service">
+      <strong>返回内容</strong>
+      <span>本次等待有了结果</span>
+    </div>
+  </div>
+  <figcaption>
+    T1–T3
+    表示先后顺序，不代表固定耗时。本地输入处理与回复处理交替执行，模型服务在远端生成内容。
+  </figcaption>
+</figure>
+<style>
+  .async-timeline {
+    margin: 1.8rem 0;
+    color: var(--series-ink);
+    font-size: 0.85rem;
+    line-height: 1.65;
+    container-type: inline-size;
+  }
+  .figure-title {
+    margin: 0 0 0.35rem;
+    font-weight: 700;
+    font-size: 1rem;
+  }
+  .reading-hint {
+    margin: 0 0 1rem;
+    color: var(--series-secondary);
+    font-size: 0.78rem;
+  }
+  .lanes {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 3rem minmax(0, 1fr);
+    align-items: stretch;
+  }
+  .lane-title {
+    font-weight: 600;
+    padding: 0 0.6rem 0.6rem;
+  }
+  .time-point {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    margin: 0.3rem 0 0.6rem;
+    font-size: 0.8rem;
+  }
+  .time-point strong {
+    flex: 0 0 auto;
+    border: 1px solid var(--series-blue);
+    border-radius: 0.3rem;
+    padding: 0.1rem 0.45rem;
+    color: var(--series-blue);
+    background: var(--series-blue-wash);
+    font-variant-numeric: tabular-nums;
+  }
+  .time-point::after {
+    content: "";
+    flex: 1;
+    border-top: 1px solid var(--series-rule);
+  }
+  .step {
+    border: 1px solid var(--series-rule);
+    border-radius: 0.5rem;
+    padding: 0.8rem 1rem;
+    background: var(--series-paper);
+    min-width: 0;
+  }
+  .step strong,
+  .step span {
+    display: block;
+  }
+  .step span {
+    color: var(--series-secondary);
+  }
+  .input {
+    border-color: var(--series-blue);
+    background: var(--series-blue-wash);
+  }
+  .input .event-label {
+    color: var(--series-blue);
+  }
+  .reply {
+    border-color: var(--series-feedback);
+  }
+  .reply .event-label {
+    color: var(--series-feedback);
+  }
+  .event-label {
+    font-size: 0.75rem;
+    margin-bottom: 0.3rem;
+  }
+  .waiting {
+    border-style: dashed;
+    background: var(--series-canvas);
+  }
+  .connector {
+    align-self: center;
+    text-align: center;
+    font-size: 1.5rem;
+    color: var(--series-blue);
+  }
+  .continuation {
+    text-align: center;
+    color: var(--series-secondary);
+    padding: 0.3rem 0;
+  }
+  figcaption {
+    margin: 0.8rem 0 0;
+    color: var(--series-secondary);
+    font-size: 0.78rem;
+  }
+  @container (max-width: 450px) {
+    .lanes {
+      grid-template-columns: minmax(0, 1fr) 1.6rem minmax(0, 1fr);
+    }
+    .step {
+      padding: 0.65rem 0.6rem;
+    }
+    .lane-title {
+      padding-left: 0.3rem;
+    }
+  }
+</style>

@@ -1,0 +1,383 @@
+---
+author: 折腾怪
+pubDatetime: 2026-09-19T15:54:45Z
+title: "Coding Agent 原理与实践 06：交互与运行控制"
+featured: false
+draft: false
+tags:
+  - Coding Agent
+  - imp
+  - Agent 原理
+description: 从查看进展、提前安排任务、执行中纠偏和中断四种交互出发，解释 Agent 的事件反馈、输入队列、取消机制，以及中断或失败后的恢复。
+---
+
+import AgentInteractionFlow from "@/components/series/AgentInteractionFlow.astro";
+import AsyncExecutionTimeline from "@/components/series/AsyncExecutionTimeline.astro";
+
+## 1. Agent 正在工作时，怎样与它交互？
+
+使用 Claude Code、Codex 这类 Coding Agent 时，一个复杂任务往往需要多次调用模型、执行工具，持续几分钟，甚至更久。在这段时间里，我们并不是只能等待最终回答，还会用到几种交互：
+
+- **查看进展**：看到 Agent 已经做了什么，以及当前正在处理什么。
+- **提前安排后续任务**：当前工作还没结束，就提交下一项要求，等本次运行结束后继续处理。
+- **追加要求、纠正方向**：发现 Agent 的理解有偏差，及时补充信息，让它在后续执行中调整做法。
+- **中断执行**：发现 Agent 正在进行预期之外的操作，主动要求它停止。
+
+imp 也支持这些交互。这些交互是怎样实现的？运行进展怎样传回界面？提前提交的下一项任务怎样排队，并在当前运行结束后开始执行？追加的信息怎样交给正在工作的 Agent，让它调整后续行动？用户要求停止时，又怎样通知正在调用的模型和工具？
+
+**本篇就沿着这些问题，解释 Agent 怎样在持续执行任务的同时，接收并响应用户的操作。** 具体的界面布局与渲染，留到第 07 篇展开。
+
+## 2. 这四种交互是怎样实现的？
+
+下面用“修复求和函数，并运行相关测试”这个任务串起执行过程。先看交互能够持续进行的前提：启动 Agent 后，接收输入的逻辑仍然在工作。
+
+异步调用让调用方在等待结果时，仍能处理其他已就绪的事件。对 Agent 来说，等待模型服务返回内容期间可以处理用户输入；内容到达后，再继续处理模型回复。
+
+<AsyncExecutionTimeline />
+
+图中展示了异步处理的效果：等待模型回复期间，Agent 仍然可以响应其他已就绪的事件。用户输入只是其中一种；模型返回新的文字片段、工具开始执行或返回结果时，也可以通知界面更新显示。因此，用户能够在任务尚未结束时，持续看到回答和运行进展。异步调用让等待期间可以处理这些通知，运行事件则告诉界面发生了什么变化。
+
+异步调用让这些交互有机会在任务执行期间被处理，但具体怎样处理，还需要 Agent 作出安排。例如，同样是在执行中收到一句话，“做完后写一份修改说明”应该等待当前运行结束，“不要修改函数接口”则需要尽早交给当前运行中的模型。收到中断操作后，还要通知正在执行的模型调用或工具停止。
+
+为了实现这些安排，需要在 Agent 循环之外增加一部分协调逻辑：根据当前运行情况处理用户输入和中断，同时接收运行进展，交给界面显示。本篇把这部分称为**交互与运行控制层**。下面这张图展示它怎样连接用户界面与 Agent 的执行过程。
+
+<AgentInteractionFlow />
+
+在 imp 中，这部分协调逻辑主要位于 [`repl/repl.ts`](https://github.com/FishInSalt/imp/blob/main/src/repl/repl.ts) 的 `ReplMachine` 中。先看它怎样启动一次运行，并接入进展通知、追加输入和取消信号；后面的各小节再分别展开。
+
+其中，`runner.runTurn` 是启动一次 Agent 运行的入口，内部会准备上下文并调用 Agent 循环。下面保留源码的主要变量和调用，省略界面装饰、统计与其他分支，不能直接复制运行。
+
+```ts
+// 文件：src/repl/repl.ts
+// 所在函数：ReplMachine.submitTurn
+// 节选单个 Agent 的运行主线；省略初始化、子代理事件和统计。
+this.state = "running"; // 先记下：已经有一次运行在进行
+this.input.setActive(true); // 更新输入区提示，仍然允许输入
+
+const controller = new AbortController(); // 为这次运行准备取消通知
+this.controller = controller;
+try {
+  const result = await this.runner.runTurn({
+    userMessage: line,
+    signal: controller.signal, // 2.4：向模型接入层和工具传递取消通知
+    onEvent: (event) => {
+      this.renderer.event(event); // 2.1：接收运行进展，更新显示
+      this.trackActivity(event);
+    },
+    getSteeringMessages: () => this.steeringMessages(), // 2.3：让循环取走追加要求
+  });
+  await this.settleSuccess(result); // 2.2：继续后续任务；中断时交还输入（第 3 节）
+} catch (err) {
+  this.settleFailure(err); // 出错后收尾，让用户能够继续操作
+}
+```
+
+这里的 `await` 等待的是一次 Agent 运行，其中可能包含多次模型调用。等待期间，新输入由另一个输入处理函数接收；它通过队列和取消控制器与这次运行配合。接下来就看这些连接为什么需要、在哪里起作用。
+
+### 2.1 模型回复和工具状态怎样传回界面？
+
+Agent 开始修复求和函数时，模型可能先回答“我先查看函数和相关测试”，随后要求读取文件。界面既要逐段显示这句话，也要在处理读取调用时显示工具状态。它们都发生在整次运行结束之前，不能只靠 `runTurn` 最后返回的结果来更新。
+
+**先看模型文字怎样逐段显示。**
+
+第 02 下篇已经介绍过，模型服务会陆续返回内容，接入层负责解析这些片段。以 [`openai-completions.ts`](https://github.com/FishInSalt/imp/blob/main/src/provider/openai-completions.ts) 为例，拿到一段文字后，接入层会向外产出一个对象：
+
+```ts
+// 文件：src/provider/openai-completions.ts
+// 所在位置：createOpenAICompletionsProvider 返回对象的 stream 方法。
+// 节选响应片段中的文字处理，省略文字累积和其他内容类型。
+const content = choice?.delta?.content;
+if (typeof content === "string" && content !== "") {
+  // 此处省略将文字累积到完整回复的代码。
+  yield { type: "text_delta", text: content };
+}
+```
+
+假设这次收到的是“我先查看函数”，对象中的 `text` 就是这段文字；`type: "text_delta"` 表示新收到了一段文字片段。`yield` 将这个对象交给读取接入层输出的代码，不必等整条回复生成完。
+
+Agent 循环中的 `streamAssistant` 逐个接收这些对象，再通过 `onEvent` 回调向外传递：
+
+```ts
+// 文件：src/core/loop.ts
+// 所在函数：streamAssistant
+// 节选接收与转发；省略 message_end 的完整消息返回及用量统计。
+for await (const event of provider.stream(request)) {
+  if (request.signal?.aborted) return null;
+  onEvent?.(event);
+  // 此处省略 message_end 的处理。
+}
+```
+
+`onEvent` 是调用方传入的函数。调用它并传入这个对象，就把收到文字的消息通知给了上层。经过 `runner` 转发后，第二节总览中的回调调用 `renderer.event(event)`，把文字交给渲染器。渲染器负责把文字展示到界面上，具体逻辑见第 07 篇。下一段文字到达时，再走一遍这个过程，回答就能逐步显示。
+
+**再看工具状态怎样更新。**
+
+模型回复中包含读取调用后，Agent 循环开始处理工具。此时需要反馈的是“开始处理哪次调用”和“这次调用得到了什么结果”。[`executeToolBatch`](https://github.com/FishInSalt/imp/blob/main/src/core/loop.ts) 在调用前后分别发出通知：
+
+```ts
+// 文件：src/core/loop.ts
+// 所在函数：executeToolBatch，串行执行分支。
+// 节选一次工具调用前后的通知，省略结果收集等代码。
+onEvent?.({
+  type: "tool_start",
+  toolCallId: call.id,
+  name: call.name,
+  args: call.arguments,
+});
+
+const result = await executeToolCall(
+  call.id, call.name, call.arguments, toolMap, signal, onToolCall,
+);
+
+onEvent?.({ type: "tool_end", result });
+```
+
+以读取文件为例，`name` 是 `read`，`args` 包含文件路径，`toolCallId` 标识这次调用。结束通知中的 `result` 保存输出或错误，也带着对应的调用标识，交互层据此更新同一次调用的状态。
+
+这里展示的是开始、结束两个时间点的通知。工具输出是否也能逐段显示，取决于工具和事件接口的实现；不能仅凭 `tool_start`、`tool_end` 就认为测试日志会实时传回。
+
+**两类信息，通过同一套运行事件传给交互层。**
+
+前面这些对象都在描述 Agent 运行期间发生的变化，本篇将它们称为**运行事件**。`type` 区分变化类型，其余字段携带对应信息：文字片段放在 `text`，工具开始信息包含名称和参数，工具结束信息包含结果。它们是 imp 的内部事件，并非模型服务统一规定的格式。
+
+渲染器收到事件后，根据 `type` 决定追加文字还是更新工具显示：
+
+```ts
+// 文件：src/render.ts
+// 所在函数：Renderer.event
+// 节选文字与工具事件；省略思考内容、换行整理和等待提示。
+switch (event.type) {
+  case "text_delta":
+    this.raw(event.text);
+    break;
+  case "tool_start":
+    this.toolStart(event.toolCallId, event.name, event.args);
+    break;
+  case "tool_end":
+    this.toolEnd(event.result);
+    break;
+}
+```
+
+因此，模型文字与工具状态都可以在运行过程中陆续传到界面。工具结果可能是错误，显示时还要区分成功与失败；具体怎样布局、刷新和折叠，留到第 07 篇。
+
+### 2.2 怎样提前提交下一项任务？
+
+假设 Agent 正在修复求和函数，你已经想好下一步：“修复后，再写一份修改说明。” 修改尚未结束，现在就开始写说明还太早；但也不必让用户一直等着。Agent 可以先保存这条输入，等当前运行结束后再处理。
+
+在 imp 中，这种等待当前运行结束后再处理的输入称为 **`followUp` 模式**，用户通过 Alt+Enter 提交。
+
+收到输入时，交互层先检查当前是否空闲：空闲就立即启动运行；否则先把输入加入队列。
+
+```ts
+// 文件：src/repl/repl.ts
+// 所在函数：ReplMachine.handleLine
+// 节选普通对话输入；省略空输入、退出检查和命令分支。
+if (this.state === "idle") {
+  void this.submitTurn(line); // 空闲时直接开始
+  return;
+}
+this.queue.push({ text: line, mode }); // 忙碌时先保存输入
+this.syncQueue();
+this.input.refresh();
+```
+
+`queue` 保存尚未处理的输入，每项记录输入文字 `text` 和提交模式 `mode`。本例的 `mode` 就是 `followUp`。`syncQueue()` 更新界面上的排队列表，让用户知道任务已经接收。
+
+取出下一项任务的时机，是当前这次 `runTurn` 返回之后。一次模型回复结束还不够，因为 Agent 可能继续调用工具和模型。`runTurn` 返回后，交互层调用 `settleSuccess`；如果没有被中断，就通过 `flushQueue` 取出排队输入：
+
+```ts
+// 文件：src/repl/repl.ts
+// 所在函数：ReplMachine.flushQueue
+// 节选普通对话输入的续跑路径；省略退出检查、提示和直接执行命令的分支。
+const [next, ...rest] = this.queue;
+if (next === undefined) {
+  this.returnToIdle(); // 队列空了，等待用户输入
+  return;
+}
+this.queue = rest;
+this.syncQueue();
+await this.submitTurn(entryText(next)); // 取出下一条文字，启动后续运行
+```
+
+`next` 是队首的输入，`rest` 是剩余输入。队列为空时，交互层回到空闲状态；否则移除队首这一项，通过 `entryText(next)` 取出它的文字，再交给 `submitTurn` 启动后续运行。
+
+在本例中，这条文字就是“修复后，再写一份修改说明”。它会作为新一轮运行的用户输入加入当前会话历史，模型可以利用此前的修改与测试结果继续工作。
+
+整个过程是：**提交后续任务 → 加入队列 → 等待当前运行结束 → 从队列取出 → 启动后续运行。**
+
+这里会取出队首的剩余输入，并不按 `mode` 筛选；这对另一种输入模式的影响，下一节再讨论。
+
+注意，这里等待的是运行结束，不是确认任务已经完成。当前 imp 即使因达到循环次数上限而结束，也会继续处理排队输入；如果后续任务依赖前一项成功，应该先检查结束原因和任务结果，再决定是否继续。中断或失败时不自动续跑，具体处理见第 3 节。
+
+### 2.3 怎样在执行中补充要求、纠正方向？
+
+上一节的修改说明可以等当前运行结束再处理。但如果你看到 Agent 正准备改动函数接口，补充一句“不要修改函数接口”，这条限制等修复结束后才送进去，就可能太晚了。
+
+这句话应该影响当前修复过程。但当前模型调用使用的是请求发出时的上下文，无法看到后来提交的补充。要让模型知道新要求，需要在**下一次模型调用之前**，把这句话加入历史。
+
+因此，这条输入也先进入上一节的 `queue`，但标记为 `steer`，供当前 Agent 循环取走。两种模式共用一个队列，通过 `mode` 区分处理时机。与 `followUp` 相比，它不必等整次运行结束。在当前终端界面中，Enter 提交的普通输入使用这个模式；Agent 不会仅凭“不要修改”这几个字自动中断操作。
+
+假设补充要求在读取代码期间到达，过程如下：
+
+| 时刻                       | Agent 正在做什么               | 补充要求在哪里               |
+| -------------------------- | ------------------------------ | ---------------------------- |
+| 用户提交“不要修改函数接口” | 当前读取操作继续执行           | 暂存在输入队列               |
+| 当前批次的工具调用结束     | 工具结果写入历史，循环准备继续 | 从队列取出这句话，加入历史   |
+| 再次调用模型               | 发送更新后的上下文             | 模型同时看到读取结果与新要求 |
+
+代码中的 `getSteeringMessages` 就是这两个位置之间的连接。它是传给循环的函数：每次调用它时，交互层从队首向后查找，取出第一条标记为 `steer` 的普通对话输入，将其转换为用户消息；排在它前面的 `followUp` 会被跳过，继续留在队列里。
+
+```ts
+// 文件：src/repl/repl.ts
+// 所在函数：ReplMachine.steeringMessages
+// 节选查找与取出逻辑；省略类型防御检查与界面提示。
+const index = this.queue.findIndex(
+  (entry) => "text" in entry && entry.mode === "steer" && !isBangLine(entry.text),
+);
+if (index === -1) return [];
+const picked = this.queue.splice(index, 1)[0];
+const next = picked.text;
+this.syncQueue();
+return [{ role: "user", content: next }];
+```
+
+`findIndex` 只找到一条，`splice(index, 1)` 也只取出一条。`isBangLine` 用来排除以 `!` 开头、需要直接执行的命令，避免将它当作给模型的补充要求。
+
+Agent 循环在每次调用模型前调用这个回调，将返回的消息写入 `history`：
+
+```ts
+// 文件：src/core/loop.ts
+// 所在函数：runAgentLoop，while 循环开头的取消检查之后。
+const steering = (await getSteeringMessages?.()) ?? [];
+for (const message of steering) {
+  history.push(message);
+  onMessage?.(message);
+}
+// 随后处理上下文，再通过 streamAssistant 调用模型。
+```
+
+所以，界面显示“已排队”和模型真正收到要求之间，可能还有一段时间。已经交给工具执行的操作，也不会因为队列里多了一句话而撤回。如果必须阻止当前操作，应使用中断，而不能只追加“先别改了”。
+
+**当前实现的局限：补充要求可能晚到，甚至进入其他任务。**
+
+假设修复任务正在等待模型回复，用户依次提交下面四条消息；这些消息全部入队后，没有新的输入：
+
+| 顺序 | 输入                 | 模式       |
+| ---- | -------------------- | ---------- |
+| 1    | 修复后写一份修改说明 | `followUp` |
+| 2    | 不要修改函数接口     | `steer`    |
+| 3    | 再补一份使用文档     | `followUp` |
+| 4    | 保持原来的返回类型   | `steer`    |
+
+如果修复任务随后只再调用一次模型，循环会跳过第 1 条，只把第 2 条加入历史。第 4 条虽然也已排队，模型这次却看不到；本应一起提供的两条约束，被拆到了不同的模型调用中。
+
+修复运行结束后，`flushQueue` 取出第 1 条，开始“写修改说明”。这次新运行在第一次调用模型前，又会从剩余队列中取出第 4 条。原本针对修复任务的要求，就这样进入了另一个任务。如果剩余 `steer` 本身位于队首，它还会被 `flushQueue` 直接作为新运行的用户输入。
+
+问题出在两个处理时机：每次模型调用前只取一条补充，准备结束时又没有检查是否还有待处理的 `steer`。这些消息随后被当作后续输入处理，就可能错过它们原本要影响的任务。
+
+**可以怎样改进？**
+
+对于 imp 这样一次处理一项任务的交互方式，可以按下面的顺序处理：
+
+1. **调用模型前，接收全部待处理的补充。** 按提交顺序取出此时已经收到的所有 `steer`，一起加入上下文，并从待处理队列中移除。请求发出后新到的消息，留到下一次检查时处理。
+2. **模型要求调用工具时，继续正常的 Agent 循环。** 执行工具、记录结果，再回到第 1 步，接收新的补充后调用模型。
+3. **模型不再请求工具时，先检查是否还有补充。** 如果等待回复期间又收到了 `steer`，就回到第 1 步，带上这些消息继续调用模型；没有待处理的补充，才结束当前任务。这次继续调用也可能产生工具调用，仍按正常循环处理。
+4. **当前任务结束后，再处理后续任务。** 按提交顺序取出一条 `followUp`，启动下一项任务；新任务运行期间，同样按上述规则处理输入。
+
+按这套规则，上例中的两条 `steer` 会一起交给修复任务处理，然后才依次处理“写修改说明”和“补使用文档”。
+
+上述流程不能绕过中断、失败和运行上限：遇到这些情况，应暂停自动继续并保留未处理输入。一次接收多条补充时，也需要检查上下文容量，不能因超出预算而静默丢弃消息。
+
+这套处理顺序是改进建议，当前 imp 尚未实现。现有实现中，中断或失败后怎样交还剩余输入，见第 3 节。
+
+### 2.4 怎样中断正在进行的工作？
+
+如果你发现 Agent 正在改动不该修改的文件，单纯追加一句限制可能来不及。此时可以要求中断当前工作。
+
+只把界面上的进行中提示去掉，后台操作仍可能继续；只让循环不再调用下一次模型，也不能立即结束正在等待的操作。取消通知必须传到实际工作的那一层。
+
+因此，启动运行时创建一个 `AbortController`。交互层持有它，用来发出取消通知；它的 `signal` 传给 `runner`，再传入 Agent 循环、模型接入层和工具。收到中断操作后，交互层调用 `abort()`。
+
+```ts
+// 文件：src/repl/repl.ts
+// 所在函数：ReplMachine.handleInterrupt，running 分支。
+// 省略界面提示；第一次中断通知取消，再次中断强制退出。
+this.interruptCount++;
+if (this.interruptCount === 1) {
+  this.controller?.abort();
+} else {
+  this.forceExit(130);
+}
+```
+
+各层接到通知后，负责停止自己的工作：
+
+1. **模型接入层**取消请求或停止读取响应，让等待回复的调用结束。
+2. **正在执行的工具**尝试停止操作。例如，`bash` 会向启动的子进程发送终止信号，等待关闭后整理结果。
+3. **Agent 循环**检查取消状态，停止推进后续调用，并返回中断原因。
+
+循环开头就有这样一个检查：
+
+```ts
+// 文件：src/core/loop.ts
+// 所在函数：runAgentLoop，while 循环开头。
+if (signal?.aborted) return { stopReason: "aborted", turns, usage };
+```
+
+这个检查防止循环继续推进，但已经开始的模型调用和工具操作，仍然需要各自响应信号。工具忽略取消通知，或底层操作无法立即取消时，运行就可能继续等待。
+
+所以，**“已请求停止”和“已经停止”是两个不同的状态。** imp 发出取消通知后仍保持 `running`，直到调用结束、完成收尾，才回到空闲状态。如果尚未结束时再次中断，当前实现会强制退出进程；这不等同于正常收尾。
+
+中断也不会撤销已经完成的修改。停止时，项目文件可能已经改过；此时结束的是这次 Agent 运行，修复任务是否完成，还要依据代码和测试结果判断。
+
+## 3. 中断或失败后，怎样处理尚未执行的输入？
+
+前面已经解释过，运行结束后可以自动处理下一项要求。但如果用户刚刚要求停止，队列里还留着“写一份修改说明”，此时马上继续执行，就没有尊重这次中断的意思。
+
+因此，中断后需要交还尚未处理的输入，让用户重新决定下一步；如果是运行失败，还需要说明出了什么问题。
+
+### 3.1 用户中断后，交还剩余输入
+
+`runTurn` 被中断时，可以正常返回 `stopReason: "aborted"`。因此，`settleSuccess` 的名字只表示调用没有抛出异常，内部仍然需要判断是否中断：
+
+```ts
+// 文件：src/repl/repl.ts
+// 所在函数：ReplMachine.settleSuccess
+// 省略退出检查、统计与状态栏更新。
+this.controller = null;
+this.interruptCount = 0;
+this.renderer.endRun();
+
+if (result.stopReason === "aborted") {
+  this.restoreQueueToEditor(); // 将未处理的输入交还用户
+  this.returnToIdle();
+  return; // 不进入下面的队列续跑
+}
+await this.flushQueue();
+```
+
+在当前终端界面中，`restoreQueueToEditor` 把未处理的输入合并为可编辑文本，等待用户修改或重新提交；已经加入历史的要求不会退回。`returnToIdle` 清理活动显示，并将运行状态恢复为空闲，此后新的输入才会启动下一次运行。
+
+### 3.2 运行失败后，报告错误并交还剩余输入
+
+如果模型请求等环节抛出异常，第二节开头的 `catch` 会进入 `settleFailure`。它结束运行提示、报告错误，然后采用同样的收尾方式：
+
+```ts
+// 文件：src/repl/repl.ts
+// 所在函数：ReplMachine.settleFailure，普通错误路径。
+// 前面已清理运行显示，并单独处理 AbortError；省略恢复提示。
+this.reportError(err);
+this.restoreQueueToEditor();
+this.returnToIdle();
+```
+
+`AbortError` 表示调用因取消而结束，源码会单独识别，避免将它显示成模型服务故障。普通错误则说明执行没有按预期完成，先交还剩余输入，用户才能根据错误决定重试、调整要求或停止。
+
+中断和失败都可能发生在部分操作已经完成之后。已经产生的工具结果和会话记录，由第 01、05 篇介绍的机制保留；恢复到可以输入的状态，不表示这次执行过程已被清空或撤销。
+
+## 4. 从交互行为，到界面呈现
+
+沿着这次修复任务，运行事件让用户看见进展；排队的后续任务在运行结束后继续处理；追加要求进入当前运行后续的模型请求；取消通知则让各层停止工作，并在收尾后把控制交还给用户。
+
+接下来再看怎样把这些行为做成好用的界面：回答不断增长时，输入区怎样保持稳定？工具输出很长时，怎样保留重点又能展开查看？第 07 篇继续讨论界面设计与实现。

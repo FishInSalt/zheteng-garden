@@ -1,0 +1,112 @@
+---
+import "./series-visual.css";
+---
+
+<figure
+  class="interaction-flow series-visual not-prose"
+  aria-labelledby="interaction-flow-title"
+>
+  <p id="interaction-flow-title" class="figure-title">
+    用户操作怎样进入运行，运行进展怎样返回？
+  </p>
+  <section class="layer">
+    <strong>用户界面</strong>
+    <span>接收输入与中断操作，显示回答和工具状态</span>
+  </section>
+  <div class="connections">
+    <span>↓ 提交要求、请求中断</span>
+    <span>↑ 回答、活动状态、排队提示</span>
+  </div>
+  <section class="layer control">
+    <strong>交互与运行控制 · 本篇重点</strong>
+    <div class="responsibilities">
+      <span>运行状态<br />现在能否开始新运行</span>
+      <span>输入队列<br />追加要求何时处理</span>
+      <span>取消控制<br />通知停止并等待收尾</span>
+    </div>
+  </section>
+  <div class="connections">
+    <span>↓ 启动运行、提供追加输入、传递取消信号</span>
+    <span>↑ 运行事件、停止原因或异常</span>
+  </div>
+  <section class="layer">
+    <strong>Agent 执行</strong>
+    <span>runner 准备运行 → Agent 循环调用模型与工具</span>
+  </section>
+  <figcaption>
+    职责示意。交互层可以在等待执行完成期间继续接收操作；具体界面布局与渲染见第
+    07 篇。
+  </figcaption>
+</figure>
+<style>
+  .interaction-flow {
+    margin: 1.8rem 0;
+    color: var(--series-ink);
+    font-size: 0.85rem;
+    line-height: 1.65;
+    container-type: inline-size;
+  }
+  .figure-title {
+    font-size: 1rem;
+    font-weight: 700;
+    margin: 0 0 1rem;
+  }
+  .layer {
+    padding: 1rem;
+    border: 1px solid var(--series-rule);
+    border-radius: 0.6rem;
+    background: var(--series-paper);
+  }
+  .layer > strong,
+  .layer > span {
+    display: block;
+  }
+  .layer > strong {
+    margin-bottom: 0.3rem;
+  }
+  .layer > span {
+    color: var(--series-secondary);
+  }
+  .control {
+    border-color: var(--series-blue);
+    background: var(--series-blue-wash);
+  }
+  .responsibilities {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.6rem;
+    margin-top: 0.8rem;
+  }
+  .responsibilities span {
+    border: 1px solid var(--series-blue);
+    border-radius: 0.35rem;
+    background: var(--series-paper);
+    padding: 0.6rem 0.75rem;
+  }
+  .connections {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+    padding: 0.8rem 0.5rem;
+  }
+  .connections span:first-child {
+    color: var(--series-blue);
+  }
+  .connections span:last-child {
+    color: var(--series-feedback);
+  }
+  figcaption {
+    font-size: 0.78rem;
+    color: var(--series-secondary);
+    margin-top: 0.8rem;
+  }
+  @container (max-width: 540px) {
+    .responsibilities,
+    .connections {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    .connections {
+      gap: 0.3rem;
+    }
+  }
+</style>
