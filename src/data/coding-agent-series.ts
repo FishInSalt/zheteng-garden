@@ -38,8 +38,8 @@ export const codingAgentChapters = [
   },
   {
     number: "05",
-    title: "会话与持久化",
-    question: "怎样保存、恢复和分叉一个任务的历史？",
+    title: "会话与持久化：保存记录，恢复任务",
+    question: "怎样保存任务记录，并在重新打开后恢复历史？",
     postId: "coding-agent-05-sessions",
   },
   {

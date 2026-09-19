@@ -1,0 +1,165 @@
+---
+import "./series-visual.css";
+---
+
+<figure
+  class="session-diagram series-visual not-prose"
+  aria-labelledby="session-recovery-title"
+>
+  <p class="figure-title" id="session-recovery-title">
+    重新打开后，哪些记录进入 history？
+  </p>
+  <div class="recovery-grid">
+    <section class="panel">
+      <p class="panel-title">磁盘：保存的会话记录</p>
+      <div class="node muted">
+        <strong>较早的消息</strong>
+        <span>任务、读取代码、修改过程……</span>
+      </div>
+      <div class="node summary">
+        <strong>压缩记录 C</strong>
+        <span>summary：任务约束与已完成的修改</span>
+        <span>retainedTail：最近的测试调用与失败结果</span>
+      </div>
+      <div class="node">
+        <strong>压缩后新增的消息 N</strong>
+        <span>用户：下次先排查负数用例。</span>
+      </div>
+      <p class="note">以上记录均保留在文件中。</p>
+    </section>
+    <div class="connector" aria-hidden="true">
+      <span class="wide-arrow">→</span>
+      <span class="small-arrow">↓</span>
+    </div>
+    <section class="panel restored">
+      <p class="panel-title">重建：buildContext()</p>
+      <ol class="history">
+        <li>
+          <strong>摘要消息</strong>
+          <span>从 C.summary 转换而来。</span>
+        </li>
+        <li>
+          <strong>近期原文</strong>
+          <span>从 C.retainedTail 取出测试调用和结果。</span>
+        </li>
+        <li>
+          <strong>后续消息</strong>
+          <span>接上 N：先排查负数用例。</span>
+        </li>
+      </ol>
+      <div class="continue">
+        <strong>恢复到内存中的 history</strong>
+        <span>等待新的输入：“继续修复”。</span>
+      </div>
+      <p class="note">较早的原始消息不再逐条加入本次上下文。</p>
+    </section>
+  </div>
+  <figcaption>
+    教学示意：C、N
+    用来标识图中的记录。重启时使用已保存的压缩结果，不重新生成摘要。
+  </figcaption>
+</figure>
+<style>
+  .session-diagram {
+    margin: 1.8rem 0;
+    color: var(--series-ink);
+    font-size: 0.85rem;
+    line-height: 1.7;
+    container-type: inline-size;
+  }
+  .figure-title {
+    font-size: 1rem;
+    font-weight: 700;
+    margin: 0 0 1rem;
+  }
+  .recovery-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 1.7rem minmax(0, 1fr);
+    align-items: start;
+  }
+  .panel {
+    border: 1px solid var(--series-rule);
+    border-radius: 0.6rem;
+    padding: 1rem;
+    background: var(--series-paper);
+    min-width: 0;
+  }
+  .panel-title {
+    margin: 0 0 0.9rem;
+    font-weight: 700;
+  }
+  .node {
+    border: 1px solid var(--series-rule);
+    padding: 0.7rem 0.85rem;
+    border-radius: 0.35rem;
+    margin-top: 0.6rem;
+    background: var(--series-paper);
+    overflow-wrap: anywhere;
+  }
+  strong,
+  span {
+    display: block;
+  }
+  strong {
+    font-weight: 600;
+  }
+  .node span,
+  .history span {
+    color: var(--series-secondary);
+  }
+  .muted {
+    border-style: dashed;
+  }
+  .summary {
+    border-color: var(--series-blue);
+    background: var(--series-blue-wash);
+  }
+  .restored {
+    border-color: var(--series-feedback);
+  }
+  .connector {
+    align-self: center;
+    text-align: center;
+    color: var(--series-blue);
+    font-size: 1.4rem;
+  }
+  .small-arrow {
+    display: none;
+  }
+  .history {
+    padding-left: 1.3rem;
+    margin: 0;
+  }
+  .history li {
+    padding: 0.3rem 0 0.7rem 0.1rem;
+  }
+  .history li::marker {
+    color: var(--series-feedback);
+    font-weight: 700;
+  }
+  .continue {
+    border-top: 1px solid var(--series-feedback);
+    margin-top: 1rem;
+    padding-top: 0.8rem;
+  }
+  .note,
+  figcaption {
+    color: var(--series-secondary);
+    font-size: 0.78rem;
+    margin: 0.8rem 0 0;
+  }
+  @container (max-width: 560px) {
+    .recovery-grid {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    .wide-arrow {
+      display: none;
+    }
+    .small-arrow {
+      display: block;
+    }
+    .connector {
+      padding: 0.35rem;
+    }
+  }
+</style>
