@@ -1,6 +1,7 @@
 ---
 author: 折腾怪
 pubDatetime: 2026-09-16T13:03:58Z
+modDatetime: 2026-09-19T15:54:45Z
 title: "Coding Agent 原理与实践 02（下）：模型接入：流式响应与组装"
 featured: false
 draft: false
@@ -290,7 +291,7 @@ throw new Error("Provider stream ended without a message_end event");
 
 这里要区分**事件**和上篇的**消息**：事件传递接收过程中的变化，消息保存对话内容。`message_end` 把两者接起来——它携带一条完整的 `assistant` 消息。Agent 循环取得这条消息后，再将它写入 `history`，筛选工具请求并执行。
 
-这样，界面可以逐段显示，历史中又不必为每个文字片段增加一条消息。怎样把事件显示在终端里，留到第 06 章。
+这样，界面可以逐段显示，历史中又不必为每个文字片段增加一条消息。交互层怎样响应这些事件，留到第 06 章；终端中具体怎样显示，留到第 07 章。
 
 ## 3. 模拟运行：半截路径怎样变成完整参数
 
