@@ -1,0 +1,432 @@
+---
+author: 折腾怪
+pubDatetime: 2026-09-23T15:09:58Z
+title: "Coding Agent 原理与实践 07：终端界面——回答与状态怎样实时刷新"
+featured: false
+draft: false
+tags:
+  - Coding Agent
+  - imp
+  - Agent 原理
+description: 从模型文字、工具状态、子代理进展和等待动画出发，解释终端控制序列、显示状态、组件与差异重绘怎样配合，让 Coding Agent 在终端中持续更新界面。
+---
+
+import TerminalRenderingDiagram from "@/components/series/TerminalRenderingDiagram.astro";
+import TerminalActivityDemo from "@/components/series/TerminalActivityDemo.astro";
+
+## 1. 终端里的回答与状态，是怎样不断变化的？
+
+使用主流 Coding Agent 时，把一个任务交给它，我们就能在界面上持续看到任务进展：回答逐渐出现，工具开始运行、返回结果，工作状态也随之变化。即使任务还没有完成，用户也能知道它正在做什么。
+
+以 imp 为例，把“修复求和函数，并运行测试”交给它后，终端里可能发生这些变化：
+
+- **文字回复**：模型返回的回答逐段显示，代码块按相应格式呈现。
+- **思考文本**：模型服务提供思考内容时，用较暗、斜体的样式展示，与回答区分开。
+- **工具状态与结果**：显示正在运行的工具、参数摘要和耗时；结束后移除运行提示，在对话记录中留下完成状态和结果。结果可以折叠、展开，文件修改也可以用颜色标出新增和删除的内容。
+- **子代理状态**：任务交给子代理时，显示它的任务摘要、最近调用的工具、工具调用次数和耗时。
+- **工作状态**：等待符号持续转动，工具和子代理的运行时间不断增加。
+- **输入区与底部信息**：用户可以继续编辑文字，排队消息、模型和用量等信息随状态更新。
+
+第 06 篇介绍了交互与运行控制，解释模型回复、工具状态等信息怎样通过运行事件传到交互层。本篇接着看：**收到这些信息后，Agent 怎样把它们实时显示在终端里？**
+
+## 2. 各个区域怎样更新显示内容
+
+程序通常通过标准输出向终端发送文字。在 Node.js 中，`process.stdout.write("正在运行")` 就是在做这件事。终端接收这些字节后，解释文字编码，并把字符画在当前光标所在的位置。
+
+除了普通文字，终端还能识别特定的控制字符和转义序列，用来移动光标、清除内容或改变样式。例如下面这个教学示例，在同一行把“正在运行测试”替换成“测试完成”：
+
+```js
+// 教学示例，独立演示单行重绘，不是 imp 源码节选。
+// 在支持这些控制序列的交互终端中运行。
+process.stdout.write("正在运行测试...");
+setTimeout(() => {
+  process.stdout.write("\r\x1b[2K测试完成\n");
+}, 1000);
+```
+
+第二次输出包含三个动作：
+
+| 内容         | 终端怎样处理                                 |
+| ------------ | -------------------------------------------- |
+| `\r`         | 把光标移到当前行的开头，不换行               |
+| `\x1b[2K`    | 清除当前整行；这里的 `\x1b` 表示 Escape 字符 |
+| `测试完成\n` | 写入新文字，再换行                           |
+
+只回到行首、不清除旧内容是不够的。新文字比旧文字短时，行尾可能留下旧字符。颜色也是通过控制序列设置的，例如 `\x1b[32m` 切换到绿色，`\x1b[0m` 恢复默认样式。这些控制序列的含义可以查阅 [xterm.js 的终端序列说明](https://xtermjs.org/docs/api/vtfeatures/)。
+
+这解释了单行状态变化的基础：**光标回到要修改的位置，清除旧内容，再写入新内容。** 多行界面还要处理光标上下移动、换行和滚动。如果回答、工具状态和输入框分别移动光标、输出文字，就容易互相覆盖，因此需要统一协调。
+
+imp 默认的交互界面属于 **TUI（Terminal User Interface，终端用户界面）**。早期规划中，imp 考虑过参考 pi-tui 的组件设计自研终端界面，也考虑过使用 React 式的终端 UI 库 Ink，最终直接引入了 pi 项目中的 [pi-tui](https://github.com/earendil-works/pi/tree/main/packages/tui)。
+
+这样可以复用 pi-tui 的编辑器、布局和重绘能力，由 imp 负责组织模型回复、工具状态等显示内容。各区域先更新自己要显示的内容，再通过 `requestRender()` 通知 TUI 安排刷新。
+
+先看这些内容分别显示在哪里。下面按 imp 的主要区域画出终端布局，图中的文字用于说明各区域的作用：
+
+<TerminalRenderingDiagram variant="regions" />
+
+本节先看各区域怎样更新自己的显示内容，再通过 `requestRender()` 请求刷新。第三节接着解释 pi-tui 怎样把这些变化画到终端上。源码按文件、函数分别节选，省略部分在注释中标明。
+
+### 2.1 回答和思考内容怎样逐步显示？
+
+模型返回一段新文字后，显示层先为它处理样式，再追加到对话区保存的内容中，最后通知界面刷新。在 imp 中，`Renderer` 负责处理样式，`TranscriptSink` 负责保存用于显示的对话内容。
+
+先看它们怎样连接。imp 的 [`cli.ts`](https://github.com/FishInSalt/imp/blob/main/src/cli.ts) 在创建 `Renderer` 时，为它指定输出文字的 `write` 函数。默认 TUI 模式下，这个函数将文字交给 `TranscriptSink.feed`；其他模式可以直接写向标准输出：
+
+```ts
+// 文件：src/cli.ts
+// 所在函数：runInteractive
+// 节选输出目标的选择；省略 shell、其他显示选项的准备。
+const transcript = shell === "tui" ? new TranscriptSink() : undefined;
+const renderer = new Renderer({
+  write: transcript ? transcript.feed : (text) => process.stdout.write(text),
+  // 省略其余选项；交互模式启用 Markdown 展示。
+});
+```
+
+`TranscriptSink` 保存的是当前界面的显示记录，与第 05 篇保存到磁盘、用于恢复对话的会话历史不同。
+
+模型回复在生成过程中，会陆续传来文字片段。模型接入层把这些片段作为 `text_delta` 事件传出，其中 `text` 字段保存本次新增的文字。沿着第 06 篇介绍的事件传递过程，事件到达 `Renderer.event` 后，会进入对应的处理分支：
+
+```ts
+// 文件：src/render.ts
+// 所在函数：Renderer.event
+// 节选文字片段的处理分支，省略其他事件。
+switch (event.type) {
+  case "text_delta":
+    // 此处省略输出剩余思考文本的 flushThinking() 调用。
+    this.raw(event.text);
+    break;
+}
+```
+
+`raw` 接收 `event.text` 中的新文字，处理显示格式后，再通过前面配置的 `write` 交给 `TranscriptSink.feed`。默认 TUI 模式下，imp 会先积累文字，按段落或完整代码块处理 Markdown 样式，因此回答更接近逐段显示。
+
+接下来，`write` 将文字交给 `TranscriptSink.feed`。它先更新显示记录，再通知界面刷新：
+
+```ts
+// 文件：src/repl/transcript.ts
+// 所在函数：TranscriptSink.feed
+// 按源码简化，只展示普通文字与换行；移除控制序列及其跨片段缓存处理。
+feed = (chunk: string): void => {
+  let buffer = chunk;
+  let changed = false;
+  while (buffer.length > 0) {
+    const newline = buffer.indexOf("\n");
+    if (newline === -1) {
+      this.current += buffer;
+      changed = true;
+      break;
+    }
+    this.completeLine(this.current + buffer.slice(0, newline));
+    this.current = "";
+    buffer = buffer.slice(newline + 1);
+    changed = true;
+  }
+  if (changed) this.onUpdate?.();
+};
+```
+
+`current` 保存尚未换行的文字。例如，`feed` 先收到 `"我先查看"`，再收到 `"求和函数。\n"`，便会先追加文字，再把完整的一行交给 `completeLine` 保存，清空 `current`，准备接收下一行。
+
+尚未换行的 `current` 也会被 `TranscriptSink.render()` 返回，参与显示；换行并不是这里触发刷新的条件。只要内容发生变化，`feed` 就调用 `onUpdate` 通知界面。前面 Markdown 处理可能等待段落或代码块完整，是文字进入 `feed` 之前的处理。
+
+这个通知怎样变成一次界面刷新？`TuiShell` 启动时，把 `onUpdate` 接到了 TUI 的 `requestRender`：
+
+```ts
+// 文件：src/repl/shell.ts
+// 所在函数：TuiShell.start
+// 节选显示记录与刷新通知的连接。
+this.boundOnUpdate = () => tui.requestRender();
+this.options.transcript.onUpdate = this.boundOnUpdate;
+```
+
+因此，文字的显示路径是：**`write` 交付文字 → `feed` 更新显示记录 → `onUpdate` 通知 TUI → `requestRender` 安排刷新。** TUI 刷新时，会读取更新后的对话内容，并将变化画到终端上；具体怎样重绘，留到第三节展开。
+
+思考内容也沿着这条路径显示：`thinking_delta` 使用独立的文字缓冲，加上较暗、斜体样式后，同样通过 `write` 加入显示记录并触发刷新。隐藏思考内容时，显示会改为简短标签。这里显示的是模型服务实际返回的思考内容；服务没有提供的内容，界面无法自行取得。
+
+活动区中的 `thinking…` 则只是等待或工作提示。它与思考正文没有直接的对应关系，不能凭这个标签判断模型内部正在做什么。
+
+### 2.2 工具、子代理和工作状态怎样刷新？
+
+工具开始运行时，活动区增加一行；运行期间，这一行的耗时持续变化；工具结束后，再移除这一行。下面以 `bash` 运行测试为例，看这些变化怎样实现。
+
+**工具开始与结束：更新正在运行的调用**
+
+<TerminalActivityDemo mode="tool" />
+
+同一种工具可能被调用多次，因此需要按调用 ID 区分记录。例如，两个 `read` 同时运行时，仅凭工具名就无法判断该移除哪一行。
+
+imp 在 `activityTools` 中按工具调用 ID 保存正在运行的工具，收到结束事件后，再按同一个 ID 删除。下面保留普通工具的处理路径：
+
+```ts
+// 文件：src/repl/repl.ts
+// 所在函数：ReplMachine.trackActivity
+// 节选普通顶层工具的两个分支，省略子代理和 task 工具分支。
+if (event.type === "tool_start") {
+  this.activityTools.set(event.toolCallId, {
+    id: event.toolCallId,
+    name: event.name,
+    label: summarizeArgs(event.name, event.args),
+    startedAtMs: Date.now(),
+  });
+  this.pushActivity();
+  return;
+}
+if (event.type === "tool_end") {
+  this.activityTools.delete(event.result.toolCallId);
+  this.pushActivity();
+}
+```
+
+`pushActivity` 把当前正在运行的工具、子代理及工作状态整理成一份活动快照，交给 `TuiShell.setActivity`。后者保存这份状态，并调用 `renderActivity` 生成活动区的显示内容。
+
+`renderActivity` 先清空活动区的旧组件，再为每个正在运行的工具创建文字组件。下面是生成工具行的部分；其中 `frame` 是当前等待符号，`elapsed` 根据开始时间计算耗时：
+
+```ts
+// 文件：src/repl/shell.ts
+// 所在函数：TuiShell.renderActivity
+// 节选工具行的生成；省略空闲判断、frame/elapsed 定义、工作提示及子代理行。
+this.activityContainer.clear();
+for (const tool of this.activity.tools) {
+  const label = tool.label === "" ? "" : ` ${tool.label}`;
+  this.activityContainer.addChild(
+    new Text(dim(`${frame} ${tool.name}${label}${elapsed(tool.startedAtMs)}`, true), 0, 0),
+  );
+}
+this.tui?.requestRender();
+```
+
+例如，工具名是 `bash`、参数摘要是 `npm test`，运行了 3 秒，这里就会生成类似 `⠙ bash npm test 3s` 的文字。`Text` 保存要显示的文字，`dim` 添加较暗的样式，最后由 `requestRender()` 通知 TUI 刷新。
+
+收到 `tool_end` 后，调用记录被删除。再次生成活动区时，就不再包含它的运行提示。与此同时，`Renderer.toolEnd` 把完成或失败状态写入对话记录，工具结果也保留在那里，供用户回看。
+
+**子代理：更新任务摘要和工具活动**
+
+<TerminalActivityDemo mode="agent" />
+
+子代理也通过活动快照显示，但每行的内容不同：
+
+| 显示内容             | 数据怎样变化                       |
+| -------------------- | ---------------------------------- |
+| 子代理名称、任务摘要 | 开始调用 `task` 工具时建立记录     |
+| 最近调用的工具       | 收到该子代理的 `tool_start` 时更新 |
+| 工具调用次数         | 每收到一次子代理工具开始事件就增加 |
+| 已运行时间           | 由界面根据开始时间计算             |
+| 活动行消失           | 对应的顶层 `task` 调用结束时移除   |
+
+子代理的文字不会原样混入主 Agent 的回答。交互层根据事件附带的来源信息找到对应子代理，更新它最近调用的工具和调用次数，再用这些数据生成活动行。
+
+**等待动画和耗时：由定时器触发更新**
+
+<TerminalActivityDemo mode="timer" />
+
+还有一种变化不需要模型或工具发来事件：耗时要增长，等待符号要转动。`TuiShell` 在非空闲期间启动定时器：
+
+```ts
+// 文件：src/repl/shell.ts
+// 所在函数：TuiShell.setActivity
+// 节选创建计时器的分支；空闲时清理计时器的代码省略。
+if (this.activityTimer === null) {
+  this.activityTimer = setInterval(() => {
+    this.activityFrame = (this.activityFrame + 1) % SPINNER_FRAMES.length;
+    this.renderActivity();
+  }, 120);
+  this.activityTimer.unref?.();
+}
+```
+
+`SPINNER_FRAMES` 保存 `⠋⠙⠹⠸…` 这样的字符序列。定时器改变下标，`renderActivity` 选择当前字符，重新计算工具和子代理的耗时，再调用 `requestRender()`。于是，即使网络暂时没有返回内容，界面也能变化。这不是进度百分比，也不表示后台一定取得了新进展。
+
+整次运行结束、界面进入空闲状态时，还要清除定时器和活动行，避免留下仍在工作的提示。
+
+### 2.3 工具结果怎样折叠与展开？
+
+一个工具可能返回几百行日志。imp 把摘要和正文保存在 `Fold` 组件里，用 `expanded` 记录是否展开。
+
+按下 Ctrl+O 后，imp 会统一切换当前所有结果的展开状态：只要有结果收起，就全部展开；已经全部展开时，就全部收起。随后请求界面刷新：
+
+```ts
+// 文件：src/repl/shell.ts
+// 所在函数：TuiShell.start 中注册的输入监听回调
+// 节选 Ctrl+O 分支，省略其他按键处理。
+if (matchesKey(data, "ctrl+o")) {
+  if (this.folds.length === 0) return undefined;
+  const expand = this.folds.some((f) => !f.isExpanded());
+  for (const fold of this.folds) fold.setExpanded(expand);
+  this.tui?.requestRender();
+  return { consume: true };
+}
+```
+
+`setExpanded` 修改每个折叠组件的 `expanded` 状态，`consume: true` 表示这个按键已经处理。刷新时，`Fold.render` 根据新状态决定返回哪些内容：
+
+```ts
+// 文件：src/repl/components/fold.ts
+// 所在函数：Fold.render
+// 节选行数变化的逻辑；省略 head 的箭头、颜色生成。
+const w = Math.max(1, width);
+// 此处省略根据 expanded 和 error 生成 head 的代码。
+const rendered = [truncateToWidth(head, w)];
+if (this.expanded) {
+  for (const line of this.body) rendered.push(truncateToWidth(line, w));
+}
+return rendered;
+```
+
+这里的 `render(width)` 接收可用列宽，返回一个字符串数组，每项代表一行显示内容。收起时只有一行；展开后，数组会多出正文行。
+
+imp 把折叠组件放在对话记录中对应工具的下方。因此，展开或收起会改变这部分内容占用的行数，后续内容的位置由 TUI 重新安排，具体见第三节。这个操作只改变显示，不会重新执行工具，也不会修改发给模型的上下文。
+
+### 2.4 输入区、排队提示和状态栏怎样更新？
+
+**输入区：键盘操作更新编辑内容**
+
+输入框里的文字由编辑器组件单独保存。收到普通编辑按键时，编辑器更新文字和编辑位置；回答增加或工具状态刷新时，仍然使用这份输入内容。按键怎样交给编辑器、重绘后屏幕光标怎样回到编辑位置，第三节会继续解释。
+
+**排队提示：队列变化后更新预览**
+
+交互层把尚未处理的消息交给 `TuiShell.setQueue`，由它生成队列数量和消息预览，更新文字组件后请求刷新。队列为空时清空文字，这个区域便不再占用显示行。消息何时执行由第 06 篇的运行控制逻辑决定。
+
+**底部状态栏：配置或统计信息变化后替换文字**
+
+有新的模型、会话或用量信息时，交互层调用 `TuiShell.setFooter` 更新底部文字：
+
+```ts
+// 文件：src/repl/shell.ts
+// 所在函数：TuiShell.setFooter
+setFooter(text: string): void {
+  this.footerText = text; // 保存文字，供界面启动时读取
+  this.footer?.setText(text === "" ? "" : dim(text, true));
+  this.tui?.requestRender(); // 文字变化后，请求刷新
+}
+```
+
+`setText` 替换文字组件的内容，`dim` 设置较暗的样式，`requestRender` 通知 TUI 稍后将变化画出来。用量显示也是收到新的统计数据后才更新。
+
+到这里，各个区域都准备好了新的显示内容，并调用 `requestRender()` 请求刷新。接下来，pi-tui 怎样把这些变化真正画到终端上？
+
+## 3. pi-tui 怎样把显示内容更新到终端
+
+假设工具还在运行，耗时从 2 秒增加到 3 秒，用户正在输入“请保持函数接口不变”。imp 已经更新了活动区的数据，也调用了 `requestRender()`。接下来，屏幕上的工具状态怎样改变，输入内容和光标又怎样保留下来？
+
+下面沿着这次刷新往下看。涉及库内部的代码按 imp 使用的 **pi-tui 0.82.0** 核对，与 imp 自己的显示逻辑分开标明。
+
+<TerminalRenderingDiagram variant="pipeline" />
+
+### 3.1 怎样用组件组织终端界面？
+
+在 pi-tui 中，一个显示区域可以由一个或多个组件组成。组件保存自己的状态，通过 `render(width)` 返回当前要显示的字符串数组，每项代表一行；`width` 是可用的终端列宽。前面介绍的对话记录、折叠结果都实现了这个接口。
+
+这里的列宽不等于字符串的字符数。中文通常占两列，颜色控制序列不占显示列。因此，组件需要按可见宽度换行或截断，避免意外换行打乱后续布局。
+
+先用内置的 `Text` 和 `Input` 组件搭一个最小界面，看看使用方式：
+
+```ts
+// 教学示例：演示组件装配和一次更新，不是 imp 源码节选。
+// 省略启动、退出和真实事件来源。
+import { TUI, Text, Input, ProcessTerminal } from "@earendil-works/pi-tui";
+
+const tui = new TUI(new ProcessTerminal(), true);
+const answer = new Text("我正在检查测试。", 0, 0);
+const status = new Text("bash npm test · 2s", 0, 0);
+const input = new Input();
+input.setValue("请保持函数接口不变");
+
+tui.addChild(answer);
+tui.addChild(status);
+tui.addChild(input);
+tui.setFocus(input);
+
+// 界面启动后，计时逻辑可这样更新状态行：
+status.setText("bash npm test · 3s");
+tui.requestRender();
+```
+
+`Text` 的两个 `0` 表示不额外添加水平、垂直留白；`setFocus(input)` 将普通键盘输入交给输入组件。这里的单行 `Input` 用于演示，imp 实际使用的是支持多行编辑的 `Editor`。
+
+`addChild` 按顺序加入组件。刷新时，容器调用各组件的 `render(width)`，依次拼接它们返回的显示行。回答占两行，状态占一行，输入区就排在它们之后；回答增加或工具结果展开时，后面的区域也随之移动。
+
+`setText` 只修改文字并清除这个组件的渲染缓存。业务代码随后调用 `requestRender()`，才通知 TUI 安排刷新。**修改显示状态和把变化画到终端，是两个步骤。**
+
+### 3.2 `requestRender` 怎样安排刷新？
+
+同一小段时间里，模型可能返回几段文字，工具耗时也在变化。如果每个变化都立即触发一次重绘，会产生许多重复工作。`requestRender` 先记下“有一次刷新待处理”，再交给调度逻辑：
+
+```ts
+// 来源：@earendil-works/pi-tui，packages/tui/src/tui.ts
+// 所在函数：TUI.requestRender
+// 节选普通刷新路径，省略 force 强制刷新分支。
+if (this.renderRequested) return;
+this.renderRequested = true;
+process.nextTick(() => this.scheduleRender());
+```
+
+第一次调用将 `renderRequested` 设为 `true`，随后到来的调用看到这个标记就直接返回。`process.nextTick` 让调度在当前同步代码结束后执行。真正刷新时读取各组件的最新状态，因此合并的是刷新请求，组件里已经收到的文字和状态仍然保留。
+
+`scheduleRender` 再根据距离上次刷新的时间，决定还要等待多久：
+
+```ts
+// 来源：@earendil-works/pi-tui，packages/tui/src/tui.ts
+// 所在函数：TUI.scheduleRender
+// 节选等待时间计算；省略停止检查、定时器与后续调度。
+const elapsed = performance.now() - this.lastRenderAt;
+const delay = Math.max(0, TUI.MIN_RENDER_INTERVAL_MS - elapsed);
+// 后续通过 setTimeout 在 delay 之后调用 doRender()。
+```
+
+这个版本的最小刷新间隔为 16 毫秒。例如，上次刷新后第 3、7、10 毫秒分别收到更新，通常可以合并到约第 16 毫秒的一次刷新中。具体时间还受事件循环和渲染耗时影响。
+
+**没有刷新请求时，pi-tui 不会为了维持帧率一直重绘。** 第二节的等待动画之所以持续转动，是因为 imp 的定时器不断改变动画字符，再请求刷新。
+
+### 3.3 怎样找到并重绘发生变化的内容？
+
+定时器触发后，`doRender()` 读取终端尺寸，调用顶层容器的 `render(width)`，得到本次的显示行 `newLines`。这一组准备显示的内容就是一帧，上次的显示行保存在 `previousLines`。
+
+回到工具耗时变化的例子，先看前后两帧和终端需要执行的操作：
+
+<TerminalRenderingDiagram variant="diff" />
+
+pi-tui 用逐行比较确定变化范围：
+
+```ts
+// 来源：@earendil-works/pi-tui，packages/tui/src/tui.ts
+// 所在函数：TUI.doRender
+// 节选行比较，省略覆盖层、图片与重绘分支。
+let firstChanged = -1;
+let lastChanged = -1;
+const maxLines = Math.max(newLines.length, this.previousLines.length);
+for (let i = 0; i < maxLines; i++) {
+  const oldLine = i < this.previousLines.length ? this.previousLines[i] : "";
+  const newLine = i < newLines.length ? newLines[i] : "";
+  if (oldLine !== newLine) {
+    if (firstChanged === -1) firstChanged = i;
+    lastChanged = i;
+  }
+}
+```
+
+图中只有第二行变化，所以 `firstChanged` 和 `lastChanged` 都是 `1`（数组下标从 `0` 开始）。TUI 依据自己记录的光标位置，生成移动、清行和写入新文字的控制序列，组合后交给 `terminal.write()`。实际使用的 `ProcessTerminal` 最终通过 `process.stdout.write()` 将它们送到终端。
+
+这就是 **差异重绘**：先生成新的显示内容，再减少真正发给终端的更新。组件仍会参与生成新的一帧，其中未变的内容可以利用组件缓存。比较以行为单位，第 2 行和第 5 行同时变化时，中间几行也可能一起重绘。
+
+首次显示、终端宽度变化，以及部分滚动场景需要完整重绘。内容变短时，还要清除旧内容多出的行。每次处理完，TUI 保存这一帧及光标、可见区域等信息，作为下一次比较的依据。
+
+差异重绘依赖 TUI 保存的上一帧和光标位置。如果其他代码直接用 `console.log` 向同一个终端插入内容，这些记录就可能与实际画面不一致。因此，界面内容应统一交给 TUI 更新，调试日志可以另写文件。
+
+### 3.4 刷新之后，输入光标怎样回到原位？
+
+重画工具状态时，真实终端光标会离开输入区。但正在编辑的文字和编辑位置保存在输入组件中，不会因为这次光标移动而丢失。
+
+输入组件生成显示行时，会在希望光标停留的位置放入一个特殊标记 `CURSOR_MARKER`。TUI 在 `extractCursorPosition` 中找到并移除标记，记录它对应的行、列；完成内容重绘后，再通过 `positionHardwareCursor` 把真实光标移回去。启用硬件光标时，这也帮助中文输入法把候选框定位到输入位置。
+
+回到前面工具耗时从 2 秒变为 3 秒的例子：工具状态刷新后，TUI 会把终端光标移回输入区原来的编辑位置，用户就能接着输入。如果回答增长或结果展开，输入区的位置会重新计算，光标也会跟着新的布局移动。
+
+键盘操作同样会触发刷新：TUI 把普通按键交给当前获得焦点的组件，组件更新输入内容或编辑位置，TUI 再调用 `requestRender()`。这样，模型输出、工具状态和用户输入都通过同一个 TUI 协调更新。
+
+## 4. 从终端效果，回到一条刷新路径
+
+模型回复逐段出现、工具耗时增长、子代理状态变化、日志展开，看起来是不同的效果，最终都可以沿同一条路径理解：信息到达或计时器触发，更新显示状态，组件生成新的行，TUI 再把变化写到终端。
+
+其中，imp 负责理解运行事件并组织显示内容，pi-tui 负责布局、刷新调度和终端重绘。开发 Coding Agent 时，需要弄清这两部分怎样连接，才能在增加新的显示效果时知道该修改哪里。
+
+界面还会承接权限确认等操作。下一篇讨论权限与信任边界：Agent 怎样判断哪些内容可以信任、哪些操作需要限制或由用户批准。

@@ -50,8 +50,8 @@ export const codingAgentChapters = [
   },
   {
     number: "07",
-    title: "界面设计与实现",
-    question: "怎样把输入、回答和工具执行过程呈现为清晰、好用的界面？",
+    title: "终端界面——回答与状态怎样实时刷新",
+    question: "终端怎样逐段显示回答，并实时刷新工具和子代理状态？",
     postId: "coding-agent-07-ui",
   },
   {
