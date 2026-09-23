@@ -1,0 +1,390 @@
+---
+import "./series-visual.css";
+interface Props {
+  variant: "regions" | "pipeline" | "diff";
+}
+const { variant } = Astro.props;
+const regions = [
+  {
+    name: "对话区",
+    content:
+      "用户：修复求和函数，并运行测试。\n思考：先检查函数与测试……\n回答：我先查看求和函数。\n● read README.md ✓\n▸ 文件内容",
+    description:
+      "保存用户输入、模型回答、可见思考和已完成的工具结果。新内容追加，结果可以展开。",
+    kind: "conversation",
+  },
+  {
+    name: "活动区",
+    content:
+      "⠙ bash npm test · 3s\n⠹ reviewer · 检查修改 · 2 次工具调用 · read · 8s",
+    description:
+      "显示运行中的工具、子代理及耗时；等待时显示工作提示，结束后移除对应活动行。",
+    kind: "activity",
+  },
+  {
+    name: "排队提示",
+    content: "1 queued\n  followUp: 修复后补充测试",
+    description: "显示尚未处理的输入；队列为空时不占行。",
+    kind: "queue",
+  },
+  {
+    name: "输入区",
+    content: "> 请保持函数接口不变▏",
+    description: "保留正在编辑的文字与光标，响应键盘操作。",
+    kind: "input",
+  },
+  {
+    name: "底部状态栏",
+    content: "模型 · 会话 · Token 用量 · 上下文占用",
+    description: "显示当前配置和统计信息，数据变化后更新。",
+    kind: "footer",
+  },
+];
+---
+
+<figure
+  class="terminal-diagram series-visual not-prose"
+  aria-labelledby={`terminal-${variant}-title`}
+>
+  {
+    variant === "diff" ? (
+      <>
+        <p class="figure-title" id="terminal-diff-title">
+          只有工具状态变化，这一帧怎样更新？
+        </p>
+        <div class="diff-frames">
+          {[
+            { title: "上一帧 · previousLines", time: "2s" },
+            { title: "下一帧 · newLines", time: "3s" },
+          ].map(frame => (
+            <section class="diff-frame">
+              <p class="diff-heading">{frame.title}</p>
+              <p class="diff-line">
+                <span class="line-number">1</span>
+                <span>我正在检查测试。</span>
+              </p>
+              <p class="diff-line changed">
+                <span class="line-number">2</span>
+                <span>
+                  bash npm test · <strong>{frame.time}</strong>
+                </span>
+              </p>
+              <p class="diff-line">
+                <span class="line-number">3</span>
+                <span>
+                  &gt; 请保持函数接口不变<span class="input-cursor">▏</span>
+                </span>
+              </p>
+            </section>
+          ))}
+        </div>
+        <p class="change-summary">
+          变化范围：第 2 行。回答和输入文字保持不变。
+        </p>
+        <ol class="redraw-steps">
+          <li>
+            <>
+              <strong>定位</strong>
+              <span>光标从输入区移到第 2 行行首</span>
+            </>
+          </li>
+          <li>
+            <>
+              <strong>清行</strong>
+              <span>清除旧工具状态，避免残留字符</span>
+            </>
+          </li>
+          <li>
+            <>
+              <strong>写入</strong>
+              <span>写入 bash npm test · 3s</span>
+            </>
+          </li>
+          <li>
+            <>
+              <strong>归位</strong>
+              <span>把光标放回输入区的编辑位置</span>
+            </>
+          </li>
+        </ol>
+        <figcaption>
+          教学示意：假设三行均在可见区域，仅耗时变化，省略颜色控制码、动画和输入边框。背景标出了要重绘的行。
+        </figcaption>
+      </>
+    ) : variant === "regions" ? (
+      <>
+        <p class="figure-title" id="terminal-regions-title">
+          imp 的终端界面：哪些区域会更新？
+        </p>
+        <div class="region-map">
+          <div class="map-bar">imp · 终端区域示意</div>
+          {regions.map(region => (
+            <section class={`region-row ${region.kind}`}>
+              <div class="region-content">
+                <p class="region-label">{region.name}</p>
+                <p class="sample">{region.content}</p>
+              </div>
+              <p class="region-description">{region.description}</p>
+            </section>
+          ))}
+        </div>
+        <figcaption>
+          按主要区域示意布局，内容为教学示例；省略提问与快捷键提示。区域随内容增减高度，并非固定在屏幕的某一行。
+        </figcaption>
+      </>
+    ) : (
+      <>
+        <p class="figure-title" id="terminal-pipeline-title">
+          信息先更新显示状态，再统一写入终端
+        </p>
+        <div class="paths">
+          <section>
+            <>
+              <p class="card-title">文字与完成结果</p>
+              <p>运行事件 → Renderer</p>
+              <p class="state">
+                TranscriptSink
+                <>
+                  <br />
+                  <span>保存显示记录和折叠内容</span>
+                </>
+              </p>
+            </>
+          </section>
+          <section>
+            <>
+              <p class="card-title">当前活动与用户操作</p>
+              <p>工具／子代理事件、定时器、键盘输入</p>
+              <p class="state">
+                活动区、编辑器等组件
+                <>
+                  <br />
+                  <span>保存各自的显示状态</span>
+                </>
+              </p>
+            </>
+          </section>
+        </div>
+        <p class="arrow">↓ 内容变化后 requestRender()</p>
+        <div class="engine">
+          <>
+            <strong>pi-tui：统一布局与刷新</strong>
+            <p>组件生成显示行 → 比较前后两帧 → 确定重绘范围</p>
+          </>
+        </div>
+        <p class="arrow">↓ 文字、样式与光标控制序列</p>
+        <div class="terminal">
+          <>
+            <strong>终端</strong>
+            <span>解释控制序列，更新屏幕内容与光标</span>
+          </>
+        </div>
+        <figcaption>
+          两条路径最终进入同一个
+          TUI。模型返回内容与刷新计时器负责触发变化，终端库负责将这些变化画出来。
+        </figcaption>
+      </>
+    )
+  }
+</figure>
+<style>
+  .terminal-diagram {
+    margin: 1.8rem 0;
+    color: var(--series-ink);
+    font-size: 0.84rem;
+    line-height: 1.65;
+    container-type: inline-size;
+  }
+  .figure-title {
+    margin: 0 0 1rem;
+    font-weight: 700;
+    font-size: 1rem;
+  }
+  .region-map {
+    border: 1px solid var(--series-rule);
+    border-radius: 0.6rem;
+    overflow: hidden;
+    background: var(--series-paper);
+  }
+  .map-bar {
+    padding: 0.7rem 1rem;
+    background: var(--series-canvas);
+    border-bottom: 1px solid var(--series-rule);
+    color: var(--series-secondary);
+  }
+  .region-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr);
+    border-bottom: 1px solid var(--series-rule);
+  }
+  .region-row:last-child {
+    border-bottom: 0;
+  }
+  .region-content {
+    padding: 0.9rem 1rem;
+    min-width: 0;
+  }
+  .region-label,
+  .card-title {
+    margin: 0;
+    font-weight: 650;
+  }
+  .region-label {
+    color: var(--series-blue);
+  }
+  .sample {
+    margin: 0.5rem 0 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .region-description {
+    margin: 0;
+    padding: 0.9rem 1rem;
+    border-left: 1px dashed var(--series-rule);
+    color: var(--series-secondary);
+    align-content: center;
+  }
+  .activity {
+    background: var(--series-blue-wash);
+  }
+  .input .sample {
+    border-left: 2px solid var(--series-feedback);
+    padding-left: 0.5rem;
+  }
+  .paths {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.8rem;
+  }
+  .paths section {
+    padding: 1rem;
+    border: 1px solid var(--series-rule);
+    border-radius: 0.55rem;
+    background: var(--series-paper);
+  }
+  .paths p {
+    margin: 0.6rem 0 0;
+  }
+  .state {
+    padding: 0.7rem;
+    background: var(--series-canvas);
+    border: 1px solid var(--series-rule);
+    border-radius: 0.3rem;
+  }
+  .state span {
+    color: var(--series-secondary);
+  }
+  .arrow {
+    text-align: center;
+    margin: 0.7rem 0;
+    color: var(--series-blue);
+  }
+  .engine,
+  .terminal {
+    border: 1px solid var(--series-blue);
+    border-radius: 0.55rem;
+    padding: 0.9rem;
+    text-align: center;
+    background: var(--series-blue-wash);
+  }
+  .engine p {
+    margin: 0.4rem 0 0;
+  }
+  .terminal {
+    border-color: var(--series-feedback);
+    background: var(--series-paper);
+  }
+  .terminal span {
+    display: block;
+    color: var(--series-secondary);
+  }
+  figcaption {
+    margin-top: 0.8rem;
+    color: var(--series-secondary);
+    font-size: 0.78rem;
+  }
+  .diff-frames {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.8rem;
+  }
+  .diff-frame {
+    min-width: 0;
+    border: 1px solid var(--series-rule);
+    border-radius: 0.5rem;
+    overflow: hidden;
+    background: var(--series-paper);
+  }
+  .diff-heading {
+    margin: 0;
+    padding: 0.7rem;
+    font-weight: 650;
+    background: var(--series-canvas);
+  }
+  .diff-line {
+    margin: 0;
+    display: grid;
+    grid-template-columns: 1rem minmax(0, 1fr);
+    gap: 0.4rem;
+    padding: 0.6rem;
+    font-size: 0.76rem;
+    overflow-wrap: anywhere;
+  }
+  .line-number {
+    color: var(--series-secondary);
+  }
+  .changed {
+    background: var(--series-blue-wash);
+    border-block: 1px solid var(--series-rule);
+  }
+  .changed strong {
+    color: var(--series-blue);
+  }
+  .input-cursor {
+    color: var(--series-feedback);
+  }
+  .change-summary {
+    margin: 0.8rem 0;
+    color: var(--series-blue);
+  }
+  .redraw-steps {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.5rem;
+    counter-reset: step;
+  }
+  .redraw-steps li {
+    border: 1px solid var(--series-rule);
+    background: var(--series-paper);
+    border-radius: 0.3rem;
+    padding: 0.7rem;
+    counter-increment: step;
+  }
+  .redraw-steps strong::before {
+    content: counter(step) " · ";
+    color: var(--series-blue);
+  }
+  .redraw-steps span {
+    display: block;
+    color: var(--series-secondary);
+    margin-top: 0.2rem;
+  }
+  @container (max-width: 560px) {
+    .diff-frames,
+    .redraw-steps {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    .region-row,
+    .paths {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    .region-description {
+      border-left: 0;
+      padding-top: 0;
+      font-size: 0.78rem;
+    }
+  }
+</style>

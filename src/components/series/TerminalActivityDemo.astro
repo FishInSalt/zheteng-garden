@@ -1,0 +1,386 @@
+---
+import "./series-visual.css";
+import {
+  activityDemos,
+  timerFrame,
+  type ActivityDemoMode,
+} from "@/data/terminal-activity-demo";
+interface Props {
+  mode: ActivityDemoMode;
+}
+const { mode } = Astro.props;
+const demo = activityDemos[mode];
+const first = mode === "timer" ? timerFrame(0) : demo.frames[0];
+---
+
+<terminal-activity-demo
+  class="series-visual not-prose"
+  data-mode={mode}
+  role="group"
+  aria-label={demo.title}
+>
+  <div class="demo-heading">
+    <p class="demo-title">{demo.title}</p>
+    <span class="position" data-position
+      >{
+        mode === "timer"
+          ? "观察时间 0.00 / 3.00 秒"
+          : `步骤 1 / ${demo.frames.length}`
+      }</span
+    >
+  </div>
+  <div class="terminal-surface" aria-label="终端局部示意">
+    {
+      mode !== "timer" && (
+        <div class="terminal-region">
+          <span class="region-label">对话区</span>
+          <pre data-transcript>{first.transcript}</pre>
+        </div>
+      )
+    }
+    <div class="terminal-region activity-region">
+      <span class="region-label">活动区</span>
+      <pre data-activity>{first.activity}</pre>
+    </div>
+  </div>
+  <div class="explanation">
+    <p class="step-title" data-title>{first.title}</p>
+    <p class="trigger">触发：<span data-trigger>{first.trigger}</span></p>
+    <p data-detail>{first.detail}</p>
+  </div>
+  <div class="demo-controls" data-controls hidden>
+    <div class="buttons">
+      <button type="button" data-play>播放</button>
+      <button type="button" data-next
+        >{mode === "timer" ? "下一帧 +120ms" : "下一步"}</button
+      >
+      <button type="button" data-reset>重置</button>
+    </div>
+    <p class="motion-note" data-motion hidden>
+      已启用减少动态效果，请用单步按钮查看。
+    </p>
+  </div>
+  <p class="caption">{demo.caption}</p>
+  <span
+    class="sr-only"
+    role="status"
+    aria-live="polite"
+    aria-atomic="true"
+    data-announcement></span>
+  <noscript
+    ><p class="caption">
+      启用 JavaScript 后可播放演示；变化过程也在下文说明。
+    </p></noscript
+  >
+</terminal-activity-demo>
+
+<script>
+  import {
+    activityDemos,
+    timerFrame,
+    timerLastFrame,
+    type ActivityDemoMode,
+  } from "@/data/terminal-activity-demo";
+  class TerminalActivityDemo extends HTMLElement {
+    private cleanup?: () => void;
+    connectedCallback() {
+      this.cleanup?.();
+      const mode = this.dataset.mode as ActivityDemoMode;
+      if (!Object.hasOwn(activityDemos, mode)) return;
+      const demo = activityDemos[mode];
+      const isTimer = mode === "timer";
+      const last = isTimer ? timerLastFrame : demo.frames.length - 1;
+      const abort = new AbortController();
+      const { signal } = abort;
+      const play = this.querySelector<HTMLButtonElement>("[data-play]")!;
+      const next = this.querySelector<HTMLButtonElement>("[data-next]")!;
+      const reset = this.querySelector<HTMLButtonElement>("[data-reset]")!;
+      const motion = window.matchMedia("(prefers-reduced-motion: reduce)");
+      let index = 0;
+      let timer: ReturnType<typeof setInterval> | undefined;
+      const text = (selector: string, value: string) => {
+        const node = this.querySelector<HTMLElement>(selector);
+        if (node && node.textContent !== value) node.textContent = value;
+      };
+      const announce = (message: string) =>
+        text("[data-announcement]", message);
+      const controls = () => {
+        play.textContent =
+          timer !== undefined ? "暂停" : index === last ? "重播" : "播放";
+        play.disabled = motion.matches;
+        play.setAttribute("aria-label", `${demo.title}：${play.textContent}`);
+        next.disabled = index === last;
+        this.querySelector<HTMLElement>("[data-motion]")!.hidden =
+          !motion.matches;
+      };
+      const stop = () => {
+        if (timer !== undefined) clearInterval(timer);
+        timer = undefined;
+        controls();
+      };
+      const draw = () => {
+        const frame = isTimer ? timerFrame(index) : demo.frames[index];
+        text(
+          "[data-position]",
+          isTimer
+            ? `观察时间 ${(index * 0.12).toFixed(2)} / 3.00 秒`
+            : `步骤 ${index + 1} / ${last + 1}`
+        );
+        text("[data-transcript]", frame.transcript);
+        text("[data-activity]", frame.activity);
+        text("[data-title]", frame.title);
+        text("[data-trigger]", frame.trigger);
+        text("[data-detail]", frame.detail);
+        controls();
+      };
+      const advance = () => {
+        index = Math.min(last, index + 1);
+        if (index === last) stop();
+        draw();
+        if (!isTimer)
+          announce(demo.frames[index].title + "。" + demo.frames[index].detail);
+        else if (index === last) announce("观察结束，工具仍在运行。");
+      };
+      play.addEventListener(
+        "click",
+        () => {
+          if (timer !== undefined) {
+            stop();
+            announce("演示已暂停。");
+            return;
+          }
+          if (motion.matches || document.hidden) return;
+          if (index === last) {
+            index = 0;
+            draw();
+          }
+          // Play only the requested instance; pause any other active demo.
+          document.dispatchEvent(
+            new CustomEvent("terminal-demo-play", { detail: this })
+          );
+          timer = setInterval(advance, isTimer ? 120 : 1600);
+          controls();
+          announce("开始播放演示。");
+        },
+        { signal }
+      );
+      next.addEventListener(
+        "click",
+        () => {
+          stop();
+          advance();
+          if (isTimer && index < last) {
+            const seconds = Math.floor((index * 120) / 1000);
+            announce(
+              `观察时间 ${(index * 0.12).toFixed(2)} 秒，工具耗时 ${seconds} 秒，仍在运行。`
+            );
+          }
+        },
+        { signal }
+      );
+      reset.addEventListener(
+        "click",
+        () => {
+          stop();
+          index = 0;
+          draw();
+          announce("演示已重置。");
+        },
+        { signal }
+      );
+      document.addEventListener(
+        "terminal-demo-play",
+        event => {
+          if ((event as CustomEvent).detail !== this && timer !== undefined)
+            stop();
+        },
+        { signal }
+      );
+      document.addEventListener(
+        "visibilitychange",
+        () => {
+          if (document.hidden) stop();
+        },
+        { signal }
+      );
+      window.addEventListener("pagehide", stop, { signal });
+      motion.addEventListener(
+        "change",
+        () => {
+          if (motion.matches) stop();
+          controls();
+        },
+        { signal }
+      );
+      this.cleanup = () => {
+        stop();
+        abort.abort();
+      };
+      draw();
+      this.querySelector<HTMLElement>("[data-controls]")!.hidden = false;
+    }
+    disconnectedCallback() {
+      this.cleanup?.();
+      this.cleanup = undefined;
+    }
+  }
+  if (!customElements.get("terminal-activity-demo"))
+    customElements.define("terminal-activity-demo", TerminalActivityDemo);
+</script>
+
+<style>
+  terminal-activity-demo {
+    display: block;
+    margin: 1.3rem 0 1.8rem;
+    border: 1px solid var(--series-rule);
+    border-radius: 0.6rem;
+    background: var(--series-paper);
+    color: var(--series-ink);
+    font-size: 0.86rem;
+    line-height: 1.65;
+    overflow: hidden;
+    container-type: inline-size;
+  }
+  p {
+    margin: 0;
+  }
+  .demo-heading {
+    padding: 0.9rem 1.1rem;
+    background: var(--series-canvas);
+  }
+  .demo-title {
+    font-weight: 700;
+    font-size: 1rem;
+  }
+  .position {
+    display: block;
+    color: var(--series-secondary);
+    font-size: 0.78rem;
+    margin-top: 0.2rem;
+    font-variant-numeric: tabular-nums;
+  }
+  .terminal-surface {
+    margin: 1rem 1.1rem 0;
+    border: 1px solid var(--series-rule);
+    border-left: 3px solid var(--series-blue);
+    border-radius: 0.25rem;
+  }
+  .terminal-region {
+    padding: 0.65rem 0.8rem;
+  }
+  .terminal-region + .terminal-region {
+    border-top: 1px dashed var(--series-rule);
+  }
+  .region-label {
+    display: block;
+    font-size: 0.72rem;
+    color: var(--series-secondary);
+    margin-bottom: 0.4rem;
+  }
+  pre {
+    margin: 0;
+    padding: 0;
+    background: transparent;
+    border: 0;
+    color: var(--series-ink);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.82rem;
+    line-height: 1.9;
+    min-height: 5.7em;
+  }
+  .activity-region pre {
+    min-height: 3.8em;
+    color: var(--series-secondary);
+  }
+  .explanation {
+    padding: 0.85rem 1.1rem;
+    min-height: 9rem;
+  }
+  .step-title {
+    font-weight: 700;
+  }
+  .trigger {
+    color: var(--series-blue);
+    margin: 0.15rem 0 0.35rem;
+    font-size: 0.78rem;
+  }
+  .demo-controls {
+    padding: 0 1.1rem 0.8rem;
+  }
+  .buttons {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+  button {
+    cursor: pointer;
+    padding: 0.4rem 0.75rem;
+    border: 1px solid var(--series-rule);
+    border-radius: 0.3rem;
+    background: var(--series-paper);
+    color: var(--series-ink);
+    font: inherit;
+    min-height: 2.5rem;
+  }
+  button[data-play] {
+    background: var(--series-blue-wash);
+    border-color: var(--series-blue);
+    color: var(--series-blue);
+  }
+  button:hover:not(:disabled) {
+    border-color: var(--series-blue);
+  }
+  button:focus-visible {
+    outline: 2px solid var(--series-blue);
+    outline-offset: 3px;
+  }
+  button:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+  .motion-note {
+    margin-top: 0.5rem;
+    font-size: 0.76rem;
+  }
+  .caption {
+    padding: 0.7rem 1.1rem;
+    border-top: 1px solid var(--series-rule);
+    color: var(--series-secondary);
+    font-size: 0.74rem;
+  }
+  [hidden] {
+    display: none !important;
+  }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+  @container (max-width: 400px) {
+    .demo-heading,
+    .explanation,
+    .caption {
+      padding-left: 0.8rem;
+      padding-right: 0.8rem;
+    }
+    .terminal-surface {
+      margin-left: 0.8rem;
+      margin-right: 0.8rem;
+    }
+    .demo-controls {
+      padding-left: 0.8rem;
+      padding-right: 0.8rem;
+    }
+    pre {
+      font-size: 0.75rem;
+    }
+  }
+</style>
