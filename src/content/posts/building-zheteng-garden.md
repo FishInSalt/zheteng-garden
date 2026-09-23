@@ -1,7 +1,7 @@
 ---
-author: 折腾怪
+author: 折腾客
 pubDatetime: 2026-09-12T12:00:00.000Z
-title: 从零搭建「折腾花园」：Astro 技术博客实践
+title: 从零搭建「折腾有记」：Astro 技术博客实践
 slug: building-zheteng-garden
 featured: true
 draft: false
@@ -13,7 +13,7 @@ tags:
 description: 从 AstroPaper 开始，完成中文适配、文章与专题、静态搜索、Cloudflare 自动部署和访问统计，把搭建博客的过程变成第一篇学习笔记。
 ---
 
-我想要一个地方，记录平时学到的知识：一次排查问题的过程、一段值得保留的代码，以及对某个技术选择的理解。于是有了「折腾花园」。
+我想要一个地方，记录平时学到的知识：一次排查问题的过程、一段值得保留的代码，以及对某个技术选择的理解。于是有了「折腾有记」。
 
 这篇文章记录本站从本地开发到公网发布的完整过程，包括中文适配、Markdown 写作、全文搜索、GitHub 自动部署和访问统计。网站已经部署到 [zheteng-garden.pages.dev](https://zheteng-garden.pages.dev/)，使用 Cloudflare Pages 提供的域名，不需要租用云服务器。
 
@@ -70,7 +70,7 @@ src/styles/global.css        # 布局和阅读样式
 
 ## 完成中文界面和阅读排版
 
-第一步是把博客名称设为「折腾花园」，作者设为「折腾怪」，语言使用 `zh-CN`，时区使用 `Asia/Shanghai`。
+第一步是把博客名称设为「折腾有记」，作者设为「折腾客」，语言使用 `zh-CN`，时区使用 `Asia/Shanghai`。
 
 本站将主要配置集中在 `astro-paper.config.ts`。下面是其中的关键部分：
 
@@ -82,8 +82,8 @@ const siteUrl =
 
 site: {
   url: siteUrl,
-  title: "折腾花园",
-  author: "折腾怪",
+  title: "折腾有记",
+  author: "折腾客",
   lang: "zh-CN",
   timezone: "Asia/Shanghai",
 }
@@ -103,7 +103,7 @@ site: {
 
 ```yaml
 ---
-author: 折腾怪
+author: 折腾客
 pubDatetime: 2026-09-12T12:00:00.000Z
 title: 一次值得记录的学习
 slug: a-learning-note
@@ -229,7 +229,7 @@ Pages 会在推送新提交后构建并发布。本站当前使用平台分配�
 
 修改站点样式和升级依赖可以集中处理，普通写作只需新增文章。有几篇彼此相关的内容时，再回到专题目录进行整理。
 
-「折腾花园」的第一篇文章就写自己的搭建过程。以后每解决一个值得记住的问题，就给这里多添一篇。
+「折腾有记」的第一篇文章就写自己的搭建过程。以后每解决一个值得记住的问题，就给这里多添一篇。
 
 ## 参考资料
 

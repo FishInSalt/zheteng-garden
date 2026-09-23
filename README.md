@@ -1,9 +1,9 @@
-# 折腾花园
+# 折腾有记
 
-折腾怪的个人技术博客。基于 Astro 7 和 AstroPaper 6.1，Markdown / MDX 写作，静态生成，Pagefind 搜索。
+折腾客的个人技术博客。基于 Astro 7 和 AstroPaper 6.1，Markdown / MDX 写作，静态生成，Pagefind 搜索。
 
-- 在线博客：[折腾花园](https://zheteng-garden.pages.dev/)
-- 搭建记录：[从零搭建「折腾花园」：Astro 技术博客实践](https://zheteng-garden.pages.dev/posts/building-zheteng-garden/)
+- 在线博客：[折腾有记](https://zheteng-garden.pages.dev/)
+- 搭建记录：[从零搭建「折腾有记」：Astro 技术博客实践](https://zheteng-garden.pages.dev/posts/building-zheteng-garden/)
 - 源码仓库：[FishInSalt/zheteng-garden](https://github.com/FishInSalt/zheteng-garden)（公开）
 
 Cloudflare Pages 已连接此仓库，推送 `main` 会自动发布。当前使用平台提供的域名，尚未绑定自定义域名。
