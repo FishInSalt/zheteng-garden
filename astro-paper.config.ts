@@ -5,9 +5,9 @@ const siteUrl = process.env.SITE_URL || process.env.CF_PAGES_URL || "http://loca
 export default defineAstroPaperConfig({
   site: {
     url: siteUrl,
-    title: "折腾花园",
-    description: "折腾怪的技术学习笔记：记录问题、实践过程，以及终于想明白的那一刻。",
-    author: "折腾怪",
+    title: "折腾有记",
+    description: "折腾客的技术学习笔记：记录问题、实践过程，以及终于想明白的那一刻。",
+    author: "折腾客",
     profile: "https://github.com/FishInSalt",
     lang: "zh-CN",
     timezone: "Asia/Shanghai",
@@ -22,6 +22,6 @@ export default defineAstroPaperConfig({
     editPost: { enabled: false },
     search: "pagefind",
   },
-  socials: [{ name: "github", url: "https://github.com/FishInSalt", linkTitle: "折腾怪的 GitHub" }],
+  socials: [{ name: "github", url: "https://github.com/FishInSalt", linkTitle: "折腾客的 GitHub" }],
   shareLinks: [],
 });
