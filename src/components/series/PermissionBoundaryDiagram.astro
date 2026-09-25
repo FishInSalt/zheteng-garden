@@ -1,0 +1,204 @@
+---
+import "./series-visual.css";
+interface Props {
+  variant: "trust" | "call" | "layers";
+}
+const { variant } = Astro.props;
+const titleId = `permission-${variant}-title`;
+---
+
+<figure
+  class="permission-flow series-visual not-prose"
+  aria-labelledby={titleId}
+>
+  {
+    variant === "trust" ? (
+      <>
+        <p id={titleId} class="figure-title">
+          项目资源：先检查信任，再决定是否加载
+        </p>
+        <div class="node">
+          <strong>Agent 启动</strong>
+        </div>
+        <p class="arrow" aria-hidden="true">
+          ↓
+        </p>
+        <div class="node focus">
+          <strong>项目信任检查</strong>
+          <span>是否允许加载受这道检查控制的项目资源？</span>
+        </div>
+        <div class="branches">
+          <div class="node">
+            <span class="route">↓ 允许</span>
+            <strong>加载这些项目资源</strong>
+            <span>其中的扩展代码在此时执行</span>
+          </div>
+          <div class="node">
+            <span class="route">↓ 拒绝或未获准</span>
+            <strong>跳过这些项目资源</strong>
+            <span>不加载其中的扩展代码</span>
+          </div>
+        </div>
+        <p class="arrow">↓ 两条路径均继续启动</p>
+        <div class="node">
+          <strong>准备处理任务</strong>
+        </div>
+        <figcaption>
+          信任检查先采用显式选项或已有记录；需要询问且支持交互时，再由用户决定。
+          本图只展示受信任检查控制的项目资源，不包括用户自行安装的全局资源。
+        </figcaption>
+      </>
+    ) : variant === "call" ? (
+      <>
+        <p id={titleId} class="figure-title">
+          一次项目外写入，怎样经过执行前检查？
+        </p>
+        <div class="node">
+          <>
+            <strong>Agent 循环收到 write 调用</strong>
+            <span>目标：/work/shared/test-config.json</span>
+          </>
+        </div>
+        <p class="arrow" aria-hidden="true">
+          ↓
+        </p>
+        <div class="node">
+          <>
+            <strong>查找工具、校验参数</strong>
+            <span>失败时直接返回错误；通过后进入策略检查</span>
+          </>
+        </div>
+        <p class="arrow" aria-hidden="true">
+          ↓
+        </p>
+        <div class="node focus">
+          <strong>onToolCall：执行前钩子</strong>
+          <span>触发扩展注册的 tool_call 处理函数，等待检查结果</span>
+          <p class="arrow" aria-hidden="true">
+            ↓
+          </p>
+          <div class="node">
+            <strong>Guardian：检查目标位置</strong>
+            <span>本例命中“工作目录外写入”，等待用户批准</span>
+          </div>
+        </div>
+        <div class="branches">
+          <div class="node">
+            <>
+              <span class="route">↓ 用户允许</span>
+              <strong>执行 write</strong>
+              <span>把实际输出或执行错误交回循环</span>
+            </>
+          </div>
+          <div class="node">
+            <>
+              <span class="route">↓ 用户拒绝或取消</span>
+              <strong>不执行 write</strong>
+              <span>把拒绝原因作为工具结果交回循环</span>
+            </>
+          </div>
+        </div>
+        <figcaption>
+          以仅加载 Guardian 检查的情况为例。嵌套表示调用关系，Guardian
+          是扩展提供的检查逻辑，并非 onToolCall 的内置规则。
+          其他调用可能直接放行或拒绝，不一定进入询问。
+        </figcaption>
+      </>
+    ) : (
+      <>
+        <p id={titleId} class="figure-title">
+          从加载到执行，逐层控制风险
+        </p>
+        <div class="node">
+          <strong>加载前：检查资源来源</strong>
+          <span>决定启用哪些项目配置和可执行资源</span>
+        </div>
+        <p class="arrow">↓ 获准的资源才进入后续流程</p>
+        <div class="node">
+          <>
+            <strong>执行前：检查操作与授权</strong>
+            <span>明确操作、目标及授权范围，决定允许、拒绝或请求审批</span>
+          </>
+        </div>
+        <p class="arrow">↓ 需要审批时，获得有效批准后才继续</p>
+        <div class="node focus">
+          <>
+            <strong>执行中：受限环境</strong>
+            <span>由系统限制命令及子进程可以访问的文件和网络</span>
+          </>
+        </div>
+        <p class="arrow">↓ 操作结束，或因访问限制而失败</p>
+        <div class="node">
+          <>
+            <strong>返回结果与原因</strong>
+            <span>让 Agent 和用户知道实际发生了什么</span>
+          </>
+        </div>
+        <figcaption>
+          设计思路示意，不代表某个产品的完整流程。必要检查失败或未获批准时，停止相关操作；
+          imp 当前尚未提供图中的操作系统级执行隔离。
+        </figcaption>
+      </>
+    )
+  }
+</figure>
+
+<style>
+  .permission-flow {
+    margin: 1.8rem 0;
+    color: var(--series-ink);
+    font-size: 0.88rem;
+    line-height: 1.65;
+    container-type: inline-size;
+  }
+  .figure-title {
+    margin: 0 0 1rem;
+    font-size: 1rem;
+    font-weight: 700;
+  }
+  .node {
+    padding: 0.9rem 1rem;
+    border: 1px solid var(--series-rule);
+    border-radius: 0.6rem;
+    background: var(--series-paper);
+    overflow-wrap: anywhere;
+  }
+  .node strong,
+  .node span {
+    display: block;
+  }
+  .node span {
+    color: var(--series-secondary);
+    margin-top: 0.2rem;
+  }
+  .focus {
+    border-color: var(--series-blue);
+    background: var(--series-blue-wash);
+  }
+  .arrow {
+    margin: 0.45rem 0;
+    text-align: center;
+    color: var(--series-blue);
+    font-size: 0.8rem;
+  }
+  .branches {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.8rem;
+    margin-top: 0.8rem;
+  }
+  .node .route {
+    color: var(--series-blue);
+    margin: 0 0 0.45rem;
+  }
+  figcaption {
+    color: var(--series-secondary);
+    font-size: 0.78rem;
+    margin-top: 0.8rem;
+  }
+  @container (max-width: 440px) {
+    .branches {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+</style>

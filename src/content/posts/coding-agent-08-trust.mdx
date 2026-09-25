@@ -1,0 +1,395 @@
+---
+author: 折腾客
+pubDatetime: 2026-09-25T10:06:43Z
+title: "Coding Agent 原理与实践 08：权限与信任——怎样控制 Agent 的执行风险"
+featured: false
+draft: false
+tags:
+  - Coding Agent
+  - imp
+  - Agent 原理
+description: 从项目资源加载和工具操作两类风险出发，解释 imp 怎样通过项目信任、执行前检查与用户审批应对风险，以及授权范围、执行隔离和失败处理还需要解决哪些问题。
+---
+
+import PermissionBoundaryDiagram from "@/components/series/PermissionBoundaryDiagram.astro";
+
+## 1. Agent 的执行风险从哪里来？
+
+让 Coding Agent 修复一个项目时，我们通常希望它读取代码、修改相关文件，再运行测试。但在这个过程中，有两类风险需要留意。
+
+**一类来自项目附带的资源。** 刚克隆的仓库中，可能带有 Agent 配置、扩展或 Skill。文字内容可能影响模型的判断，扩展和脚本还可能直接执行代码。如果启动 Agent 时就自动加载它们，用户还没提交任务，项目中的代码可能已经开始访问本机资源。
+
+**另一类来自执行任务时的工具操作。** 为了修复测试，Agent 可能尝试修改全局配置，或者下载并运行一个脚本。这些操作可能影响其他项目，甚至把本地数据发送到外部，超出用户对这次任务的预期。
+
+**本篇要弄明白的是：Agent 怎样控制资源加载和工具执行的风险，减少非预期操作，并限制操作可能造成的影响？** 下面先看 imp 怎样处理这两类风险、还存在哪些局限，再结合主流 Agent 的做法，讨论怎样补上这些限制。
+
+## 2. 加载项目资源时，怎样控制风险？
+
+为了适应不同项目，Coding Agent 通常允许项目提供自己的配置和工作规则。例如，Claude Code 支持在项目的 `.claude/settings.json` 中配置 Hooks，让指定命令在会话开始、工具执行前后等时刻运行。这样，团队就可以把一些自动化处理随项目一起维护。[Claude Code 配置与 Hooks 文档](https://code.claude.com/docs/en/hooks#configuration)
+
+imp 也支持加载项目资源。例如，`.imp/extensions` 中的扩展是 JavaScript 代码。**启动时加载扩展，就会执行其中的代码，不必等到模型调用工具。** 下面节选自 [`loadExtensions`](https://github.com/FishInSalt/imp/blob/main/src/extensions/loader.ts)：
+
+```ts
+// 文件：src/extensions/loader.ts
+// 所在函数：loadExtensions，遍历待加载扩展的循环内部。
+// 启动流程先做项目信任检查；获准的项目扩展才会进入这里。
+// candidate.path 是扩展文件路径。省略类型、导出校验、注册管理和异常处理。
+
+// 导入模块时，就会执行模块顶层代码。
+mod = await import(pathToFileURL(candidate.path).href);
+const factory = mod.default;
+
+// 随后调用默认导出的初始化函数，这也会执行扩展自己的代码。
+await factory(
+  extensionApi(
+    registry,
+    {
+      cwd: options.cwd,
+      version: VERSION,
+      origin: candidate.origin,
+      name: candidate.name,
+    },
+    report,
+  ),
+);
+```
+
+`extensionApi(...)` 为扩展提供注册工具、订阅事件等接口，但扩展仍然是运行在 imp 进程中的 JavaScript 代码。例如，某个扩展在模块顶层或初始化函数里写了读取本机配置、发送到外部服务器的逻辑，**加载它就可能触发数据外传，此时模型还没有开始处理任务。**
+
+这与 `AGENTS.md` 这类文字规则不同：文字通过影响模型来影响后续操作，扩展代码则可以直接使用当前进程的权限访问文件或网络。
+
+因此，imp 把项目信任检查放在资源加载之前：**先由用户决定是否启用这些项目资源，再加载其中的扩展代码。**
+
+<PermissionBoundaryDiagram variant="trust" />
+
+下面来看 imp 怎样判断项目是否受信任，以及这道检查控制哪些资源的加载。
+
+### 2.1 信任检查决定加载什么
+
+imp 的 [`trustRequiringResources`](https://github.com/FishInSalt/imp/blob/main/src/core/trust.ts) 会检查项目中的以下资源：
+
+<div style="overflow-x: auto;" tabindex="0" role="region" aria-label="项目信任资源表，可横向滚动">
+<div style="min-width: 560px;">
+
+| 项目资源 | 为什么需要先决定是否加载 |
+| --- | --- |
+| `.imp/extensions` | 扩展可以执行代码、注册工具和处理函数 |
+| `.imp/agents`、`.imp/commands`、`.imp/skills` | 提供子代理配置或影响模型行为的内容 |
+| `.imp/settings.json` | 改变模型和运行设置 |
+| `.imp/SYSTEM.md`、`.imp/APPEND_SYSTEM.md` | 替换或补充系统指令 |
+| 项目范围内的 `.agents/skills` | 加载技能；查找范围包括到 Git 根目录之间的祖先目录 |
+
+</div>
+</div>
+
+发现这些资源后，启动流程调用 `resolveProjectTrust` 决定是否放行。下面节选它的判断逻辑：`cwd` 是当前工作目录，`resources` 是筛选后需要信任的项目资源列表。
+
+```ts
+// 文件：src/cli.ts
+// 所在函数：resolveProjectTrust
+// 节选函数体；省略 cwd、resources 的准备、界面提示与返回值类型。
+if (resources.length === 0) return true;
+const store = defaultTrustStorePath(homedir());
+
+// 优先采用用户通过 --trust / --no-trust 明确指定的决定。
+// setTrust 的第四个参数 true 允许重建损坏的信任记录文件。
+if (opts.trustDecision === "trust") {
+  setTrust(store, cwd, true, true);
+  return true;
+}
+if (opts.trustDecision === "no-trust") {
+  setTrust(store, cwd, false, true);
+  return false;
+}
+
+// 没有显式指定时，查找当前目录及其最近祖先的记录。
+const entry = nearestTrustEntry(readTrustFile(store), cwd);
+if (entry !== null) {
+  return entry.trusted;
+}
+
+if (interactive) {
+  const answer = askTui !== undefined
+    ? await askTui(cwd, resources)
+    : await askTrustOnTty(cwd, resources);
+  if (answer === null) return false; // 取消：本次不加载，不保存决定。
+  if (answer === "session") return true; // 仅本次信任，不保存决定。
+
+  // TUI 返回 "yes" / "no"，文本确认返回 true / false。
+  const trusted = answer === true || answer === "yes";
+  setTrust(store, cwd, trusted);
+  return trusted;
+}
+
+// 非交互模式且没有信任记录：本次不加载，不记录永久拒绝。
+return false;
+```
+
+拒绝时，加载器会跳过受这道检查控制的项目资源；不是退出 Agent，也不是禁止读取仓库代码。用户自己安装的全局资源，以及通过 `-e` 明确指定的扩展，不受项目扩展目录的这道检查控制。
+
+普通 `AGENTS.md` 在当前 imp 中也不受这道信任检查控制。它仍可能进入模型上下文，因此不能把“项目未受信任”理解成“项目中的文字不会影响模型”。
+
+### 2.2 信任决定怎样保存和继承？
+
+长期决定保存在 `~/.imp/trust.json`。例如下面这份示意记录，信任 `/work/team`，但拒绝它下面的一个目录：
+
+```json
+{
+  "/work/team": true,
+  "/work/team/unreviewed": false
+}
+```
+
+imp 从当前目录向上查找，遇到最近的一条记录就停止：
+
+```ts
+// 文件：src/core/trust.ts
+// 所在函数：nearestTrustEntry
+// 节选函数体；canonicalizeDir 优先使用 realpath 统一路径。
+let current = canonicalizeDir(dir);
+for (;;) {
+  const value = data[current];
+  if (value === true || value === false) {
+    return { path: current, trusted: value };
+  }
+  const parent = dirname(current);
+  if (parent === current) return null;
+  current = parent;
+}
+```
+
+打开 `/work/team/app` 时，会继承 `/work/team` 的信任；打开 `/work/team/unreviewed/demo` 时，则先遇到更近的拒绝记录。`realpath` 让同一目录的符号链接入口与真实路径尽量对应到同一份决定。
+
+### 2.3 信任项目之后，还有哪些风险？
+
+这道检查能阻止尚未获准的项目资源被自动加载，但它没有审查资源的内容，也没有限制加载后的代码能做什么：
+
+- **信任范围可能大于眼前的项目。** 信任一个父目录，可能连同它以后新增的子项目一起放行。
+- **资源变化不会自动触发重新确认。** 当前记录只保存目录与布尔值，不绑定扩展内容或版本。
+- **获准加载的扩展仍使用当前用户权限。** 即使后面设置了工具审批，扩展直接调用文件或网络 API，也不必经过 Agent 循环中的工具检查。
+
+所以，“信任这个项目”表示同意启用指定资源，不能据此判断这些资源的后续行为都安全。任务开始后，模型提出的具体操作还需要单独检查。
+
+## 3. 执行工具操作时，怎样控制风险？
+
+回到修复测试的场景。当前项目在 `/work/app`，Agent 却准备修改 `/work/shared/test-config.json`。这份配置可能被其他项目共用，修改它虽然能修好当前测试，也可能影响其他项目。
+
+控制这类风险的思路，是在工具执行之前检查操作及其目标，根据规则决定直接放行、请求用户批准，还是拒绝执行。imp 的 Agent 循环为此提供了执行前钩子 `onToolCall`。开发者可以在扩展中通过 `api.on("tool_call", handler)` 注册检查逻辑；工具执行前，`onToolCall` 会触发这些处理函数，等待检查结果后再决定是否执行工具。具体的扩展接入过程会在第 09 篇介绍。
+
+imp 参考了 pi 的扩展设计，**把具体的风险判断规则交给扩展实现，默认不启用这类规则。** 仓库附带的 [Guardian 扩展示例](https://github.com/FishInSalt/imp/blob/main/examples/extensions/guardian.mjs) 提供了一个简单实现：检查部分危险命令和文件写入，按规则拒绝操作或请求用户批准。**这个扩展需要安装并成功加载才会生效。**
+
+<PermissionBoundaryDiagram variant="call" />
+
+### 3.1 Agent 循环怎样等待检查，并决定是否执行？
+
+先看 [`loop.ts`](https://github.com/FishInSalt/imp/blob/main/src/core/loop.ts) 中的 `executeToolCall`。`prepareToolCall` 完成工具查找与参数校验，通过后把执行入口保存在 `prepared.run` 中。此时工具还没有执行，循环会先等待 `onToolCall` 的检查结果：
+
+```ts
+// 文件：src/core/loop.ts
+// 所在函数：executeToolCall
+// 节选函数体；省略签名与类型。工具查找、参数校验见第 03 篇。
+const call: ToolCallRef = { id, name, arguments: args };
+const prepared = prepareToolCall(call, toolMap);
+if ("result" in prepared) return prepared.result;
+
+// 等待执行前检查；钩子可以异步等待用户回答。
+const decision = await onToolCall?.({
+  toolCallId: id,
+  name,
+  args: args as Record<string, unknown>,
+});
+if (decision?.block) {
+  // 被拒绝时，不调用工具，直接返回错误结果。
+  return {
+    toolCallId: id,
+    toolName: name,
+    content: `Tool "${name}" blocked by an extension: ${decision.reason ?? "no reason given"}`,
+    isError: true,
+  };
+}
+return prepared.run(signal);
+```
+
+这段代码的关键在于检查和执行的顺序：
+
+1. `await onToolCall(...)` 等待检查完成。在此期间，这次工具操作不会开始执行。
+2. 如果返回的 `decision` 中有 `block: true`，直接返回拒绝原因，不执行工具。
+3. 没有接入钩子，或检查未要求阻止时，才调用 `prepared.run(signal)` 执行工具。
+
+这个钩子怎样找到扩展注册的检查？`runner.ts` 在调用 Agent 循环时传入 `onToolCall`，让它把本次调用交给扩展系统的 `emitToolCall`：
+
+```ts
+// 文件：src/runner.ts
+// 所在函数：RunnerImpl.runTurnInner
+// 节选 runAgentLoop 的调用；省略模型、历史等其他参数，不能单独运行。
+const result = await runAgentLoop({
+  onToolCall: (call) =>
+    this.options.extensions?.emitToolCall({
+      type: "tool_call",
+      ...call, // 本次工具调用的 ID、名称和参数。
+      cwd: this.options.cwd, // 让扩展按当前工作目录解释相对路径。
+    }),
+});
+```
+
+`emitToolCall` 再从已注册的处理函数中，取出监听 `tool_call` 的函数，逐个等待它们返回检查结果：
+
+```ts
+// 文件：src/extensions/registry.ts
+// 所在函数：ExtensionRegistry.emitToolCall
+// 节选函数体；省略类型断言及异常处理。实际实现还会拦截处理函数抛出的异常。
+for (const stored of this.handlers) {
+  if (stored.event !== "tool_call") continue;
+  const decision = await stored.handler(event);
+  if (decision?.block === true) return decision; // 首次拒绝后，不再继续检查。
+}
+return undefined; // 所有检查都没有要求阻止这次调用。
+```
+
+处理函数按扩展加载时的注册顺序执行。**一个扩展没有阻止调用，并不代表工具立即执行；后面的检查仍可能拒绝它。** 所有检查都未阻止调用时，Agent 循环才继续执行 `prepared.run(signal)`。
+
+### 3.2 Guardian 怎样检查一次文件写入？
+
+Guardian 通过 `api.on("tool_call", handler)` 注册检查函数。调用时，`event.name` 是工具名称，`event.args` 是调用参数。下面保留文件写入的检查，对应刚才修改共享配置的场景：
+
+```js
+// 文件：examples/extensions/guardian.mjs
+// 所在位置：default 导出函数注册的 tool_call 回调
+// 节选文件写入分支；省略 Bash 分支及辅助函数定义，不能单独运行。
+api.on("tool_call", async (event) => {
+  if ((event.name === "write" || event.name === "edit") && typeof event.args.path === "string") {
+    const cwd = callerCwd(event);
+    const floor = floorOf(path.resolve(cwd, event.args.path));
+    if (floor !== undefined) {
+      return { block: true, reason: floorReason(floor) };
+    }
+    if (!insideDir(event.args.path, cwd)) {
+      const approved = await api.confirm(
+        `[guardian] allow writing outside ${cwd}?`,
+        event.args.path,
+        { sessionKey: `guardian:write:${cwd}` },
+      );
+      if (approved) return undefined;
+      return {
+        block: true,
+        reason: `writing outside the project directory (${cwd}) — keep changes inside it, or hand files beyond the project to the human`,
+      };
+    }
+  }
+});
+```
+
+检查按以下顺序进行：
+
+1. `callerCwd(event)` 取得本次调用的工作目录，`path.resolve` 将目标路径转换为绝对路径。
+2. `floorOf` 判断目标是否位于预设的保护目录中，例如 `/etc`、`~/.ssh`。命中就返回 `{ block: true, reason: ... }`，直接拒绝。
+3. 未命中保护目录时，`insideDir` 判断目标是否在工作目录内；目标在目录外，才通过 `api.confirm` 等待用户批准。
+
+用户批准后，`return undefined` 表示 **Guardian 不阻止这次调用**；目标在工作目录内且未命中保护目录时，这个分支也不阻止调用。目标文件的写入仍由调用层在其余检查完成后交给工具执行。
+
+示例中的 `/work/shared/test-config.json` 不属于预设保护目录，但在 `/work/app` 之外，因此会进入询问分支。`sessionKey` 用来标识可以复用的批准，下一小节会解释它的作用。Guardian 还会检查部分 Bash 命令，例如递归强制删除、强制推送，以及把下载内容直接交给 Shell 执行。
+
+### 3.3 用户的回答怎样变成执行决定？
+
+刚才的 `api.confirm` 将审批问题交给终端交互层。imp 的 TUI 提供三个选项：
+
+- **允许本次**：本次检查通过，不保存批准记录。
+- **本次会话不再询问**：本次检查通过，并记住扩展提供的 `sessionKey`；后续相同键的询问可以复用批准。
+- **拒绝**：本次检查不通过。取消选择也按拒绝处理。
+
+如果没有可复用的批准，就需要等待用户选择。下面是 [`repl.ts`](https://github.com/FishInSalt/imp/blob/main/src/repl/repl.ts) 中 `TtyConfirm.handler` 的核心处理：
+
+```ts
+// 文件：src/repl/repl.ts
+// 所在函数：TtyConfirm.handler
+// 节选会话内记忆与 TUI 选择分支；省略提示输出、无 TUI 时的处理。
+const sessionKey = options?.sessionKey;
+if (sessionKey !== undefined && this.sessionAllowed.has(sessionKey)) {
+  return true; // 相同的 sessionKey 已获批准，不再询问。
+}
+const select = this.select;
+if (select !== null) {
+  // 0：允许本次；1：本次会话不再询问；2：拒绝。
+  const choice = await select({ title: message, items: CONFIRM_ITEMS });
+  if (choice === null) return false; // 取消选择也不批准。
+  if (choice === 1 && sessionKey !== undefined) {
+    this.sessionAllowed.add(sessionKey); // 只有选项 1 会记住批准。
+  }
+  return choice !== 2; // 选项 0、1 返回 true；选项 2 返回 false。
+}
+```
+
+返回值会交回 Guardian：`true` 表示用户已批准，Guardian 不阻止调用；`false` 则让 Guardian 返回 `{ block: true, reason: ... }`。无法交互确认且没有可复用批准时，确认接口也返回 `false`。
+
+“本次会话不再询问”究竟覆盖什么，由 `sessionKey` 决定。刚才的写入规则使用 `guardian:write:/work/app`。选择这个选项后，记住的是**从同一工作目录发起的项目外写入审批**，不限于这一个共享配置文件。预设保护目录仍会先被拒绝，因为那段检查发生在 `api.confirm` 之前。
+
+`sessionAllowed` 只保存在当前进程内，不会写入会话文件，重启 imp 后也不会恢复这些批准。
+
+用户拒绝后，Agent 循环把拒绝原因作为工具结果写入历史，让模型在下一次调用时知道这次工具操作没有执行。
+
+### 3.4 当前方案还存在哪些局限？
+
+这套机制能在工具执行前阻止命中规则的调用，但目前还有几处明显的局限：
+
+- **检查依赖扩展成功加载。** Guardian 是可选扩展；没有启用或加载失败时，它的规则不会生效。
+- **审批范围比较粗。** 选择“本次会话不再询问”后，同一工作目录发起的其他项目外写入，也可能复用这份批准，而不再逐个询问。
+- **规则只能识别部分风险。** 路径判断使用 `path.resolve` 和目录前缀比较，命令判断主要依靠文本规则，不能保证覆盖符号链接或脚本内部的行为。
+- **通过检查后，没有进一步限制实际访问。** 工具使用当前用户权限运行，imp 尚未提供操作系统级沙箱。一个获准运行的脚本，仍可能访问任务之外的文件或网络。
+
+因此，执行前检查只是风险控制的一部分。要限制操作真正造成的影响，还需要约束它运行时能够访问的资源。
+
+## 4. 生产级 Agent 怎样组织风险控制？
+
+前面的实现展示了怎样接入检查和审批。但面对陌生项目、外部内容和长时间运行的任务，仅检查几个危险命令还不够。先看几种容易被忽略的情况，再看主流产品怎样应对。
+
+### 4.1 看似正常的工作，风险藏在哪里？
+
+**项目文档把危险操作包装成必要步骤。** Agent 读取排障文档，文档声称“必须上传本机凭据才能完成诊断”。如果模型采纳了这条建议，就可能调用工具读取并发送敏感信息。这类通过不可信文字诱导模型改变行为的攻击，叫作**提示注入**。文档本身没有执行代码，也没有获得授权；需要防范的是模型把它当成了应当执行的要求。
+
+**扩展在模型开始工作前就执行了代码。** 一个扩展获准加载后，在初始化时读取本地文件并尝试外传。如果它与 Agent 处于同一进程、使用相同权限，这些操作就可能不经过模型的工具调用检查。因此，审查模型准备调用的工具，还覆盖不了扩展加载阶段的行为。
+
+**获准运行的测试脚本做了额外的事。** 用户同意运行 `npm test`，测试脚本却启动子进程，读取项目外的文件或连接外部服务器。命令名称看起来正常，也不代表它及其子进程的行为都在任务范围内。需要控制的是实际能访问哪些文件、网络和凭据。
+
+**一次批准被用到了其他操作上。** 用户只想允许修改一份共享配置，系统却记成“这个会话允许所有项目外写入”。后续修改另一个文件时，也不再询问。这里需要明确批准对应的操作、目标和有效期，避免授权范围被无意扩大。
+
+**检查没有完成，操作却继续了。** 审批服务超时，或必需的权限组件加载失败，系统把“没有返回拒绝”当作可以执行。对于必须先通过检查的操作，拿不到检查结果时，也应暂停或拒绝执行。
+
+### 4.2 主流产品采用了哪些方案？
+
+下面选取 Claude Code、Codex 和 Gemini CLI 的公开方案，重点看它们怎样组合不同的保护机制。具体保护范围取决于运行模式、平台与配置；支持某项能力，不代表所有场景下都会自动启用。
+
+这里先解释一个共同概念：**沙箱**是受限制的执行环境，通过操作系统或容器等机制约束代码能够访问的资源。
+
+在本地 Coding Agent 中，一种常见做法是把工具命令交给受限进程执行：macOS 可以使用 Seatbelt，Linux 可以通过 Bubblewrap 等工具配置操作系统的隔离能力。进程仍可使用本机的程序、依赖和允许访问的真实文件；当它尝试读写文件或连接网络时，操作系统会按沙箱规则允许或拒绝相应操作。具体实现可参阅 Anthropic 的[沙箱运行库说明](https://github.com/anthropics/sandbox-runtime)。
+
+**Claude Code：把信任检查、工具权限和命令隔离结合起来。**
+
+交互会话中，配置文件里的 Hooks 要等工作区信任确认后才会运行；`-p` 等非交互会话的处理不同，不能假设同样会弹出确认。工具调用则由权限规则决定允许、询问或拒绝，组合命令中的子命令会分别检查，避免批准前半段就放行整条命令。见 [Hooks 的信任检查](https://code.claude.com/docs/en/hooks#workspace-trust)与[工具权限规则](https://code.claude.com/docs/en/permissions#compound-commands)。
+
+对文档中的恶意指令，它结合上下文分析和权限检查降低提示注入风险；启用 Bash 沙箱后，再限制命令及其子进程的文件和网络访问。两者分别应对“模型被诱导”和“代码执行后越界”。但 Bash 沙箱并不覆盖所有执行路径：命令 Hooks 使用用户权限执行，内置文件工具也有自己的权限处理。见[安全机制](https://code.claude.com/docs/en/security#protect-against-prompt-injection)与[沙箱范围](https://code.claude.com/docs/en/sandboxing#scope)。
+
+**Codex：将执行环境的限制与审批策略分开。**
+
+本地运行时，沙箱规定命令能够访问的资源，审批策略决定哪些操作需要进一步批准。例如，`workspace-write` 模式限制写入范围，并默认关闭命令的网络访问；即使工作区可写，其中的 `.codex` 等受保护目录仍保持只读，减少工具改动自身控制配置的机会。见[审批、沙箱与受保护路径](https://learn.chatgpt.com/docs/agent-approvals-security)。
+
+对于需要批准的动作，还可以配置独立的自动审查 Agent，结合具体操作和任务上下文判断数据外传、凭据探查等风险。这一层只处理需要审批的动作，不会替代沙箱，也不意味着所有调用都被额外审查。见 [Auto-review](https://learn.chatgpt.com/docs/sandboxing/auto-review)。
+
+**Gemini CLI：用独立的策略引擎管理工具调用。**
+
+策略引擎按工具名称、参数和当前模式匹配规则，产生允许、拒绝或询问用户的决定，并用优先级处理规则冲突。需要询问的操作在非交互模式下按拒绝处理，避免因无人回答就自动放行。见[策略引擎](https://geminicli.com/docs/reference/policy-engine/)。
+
+启用文件夹信任检查时，未受信任的工作区会进入受限模式，不加载项目设置和 `.env` 等内容；它也提供沙箱隔离。不过不同沙箱配置的能力并不相同，例如 macOS 的 `permissive-open` 配置限制写入，却允许较广的读取和网络访问。可见“用了沙箱”还不足以判断保护程度。见[文件夹信任](https://geminicli.com/docs/cli/trusted-folders/)与[沙箱配置](https://geminicli.com/docs/cli/sandbox/)。
+
+### 4.3 这些方案背后的共同思路是什么？
+
+从这些方案中，可以归纳出一个思路：**先区分哪些来源可信，再明确允许哪些操作，并在代码执行时限制它能访问的资源。** 模型或某一次审批即使判断失误，后续仍应有其他限制，减少可能造成的影响。
+
+<PermissionBoundaryDiagram variant="layers" />
+
+这些限制还需要覆盖真正发生操作的地方：模型调用的工具、命令启动的子进程、直接执行的扩展代码，不能因为其中一条路径受到保护，就认为其他路径也受到保护。必要检查不可用时，应停止受它保护的操作；批准、拒绝和实际执行结果也应留下记录，便于核对。
+
+## 5. 从加载前检查，到运行时限制
+
+imp 提供了项目信任检查，以及通过扩展接入工具审批的机制；要把这些能力发展成更完整的风险控制，还需要明确授权范围，并补上执行隔离等保护。
+
+Guardian 也展示了扩展怎样参与 Agent 的工作流程。下一篇继续看扩展机制：外部模块怎样增加工具、命令和自定义处理逻辑。
