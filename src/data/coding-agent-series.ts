@@ -56,8 +56,8 @@ export const codingAgentChapters = [
   },
   {
     number: "08",
-    title: "权限与信任边界",
-    question: "怎样检查项目指令是否可信、工具操作是否被允许？",
+    title: "权限与信任——怎样控制 Agent 的执行风险",
+    question: "怎样控制项目资源加载和工具执行的风险，并限制操作可能造成的影响？",
     postId: "coding-agent-08-trust",
   },
   {
