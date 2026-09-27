@@ -1,0 +1,118 @@
+---
+import "./series-visual.css";
+const routes = [
+  [
+    "工具对象",
+    "保存工具说明与执行函数",
+    "模型选择后，由 Agent 循环调用 execute",
+  ],
+  ["命令对象", "保存命令名与处理函数", "用户输入对应斜杠命令后，调用处理函数"],
+  ["说明文字", "保存说明文字", "组装系统提示时加入，随模型请求发送"],
+  ["事件处理函数", "按事件名保存订阅", "模型回复或运行结束等事件发生时调用"],
+];
+---
+
+<figure
+  class="extension-flow series-visual not-prose"
+  aria-labelledby="extension-flow-title"
+>
+  <figcaption id="extension-flow-title">
+    从加载扩展，到使用扩展提供的能力
+  </figcaption>
+  <div class="loading">
+    <strong>启动：加载扩展文件</strong>
+    <span aria-hidden="true">↓</span>
+    <strong>调用初始化函数，把 api 交给扩展</strong>
+    <p>扩展调用注册接口，登记下面四类内容。</p>
+  </div>
+  <div class="routes">
+    {
+      routes.map(([name, registration, use]) => (
+        <div class="route">
+          <strong>{name}</strong>
+          <p>
+            <span>注册时</span>
+            {registration}
+          </p>
+          <p>
+            <span>运行时</span>
+            {use}
+          </p>
+        </div>
+      ))
+    }
+  </div>
+  <p class="caption">
+    初始化成功后保留注册记录。登记一个函数，与执行这个函数，是两个不同的时刻。
+  </p>
+</figure>
+<style>
+  .extension-flow {
+    margin: 2rem 0;
+    padding: 1.25rem;
+    border: 1px solid var(--series-rule);
+    border-radius: 0.8rem;
+    background: var(--series-paper);
+    color: var(--series-ink);
+    container-type: inline-size;
+  }
+  figcaption {
+    font-weight: 700;
+    margin-bottom: 1rem;
+  }
+  .loading {
+    padding: 1rem;
+    background: var(--series-blue-wash);
+    border: 1px solid var(--series-blue);
+    border-radius: 0.5rem;
+    text-align: center;
+  }
+  .loading strong,
+  .loading span {
+    display: block;
+  }
+  .loading span {
+    color: var(--series-blue);
+    margin: 0.25rem;
+  }
+  .loading p {
+    margin: 0.65rem 0 0;
+    color: var(--series-secondary);
+    font-size: 0.9rem;
+  }
+  .routes {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.75rem;
+    margin-top: 1rem;
+  }
+  .route {
+    padding: 1rem;
+    border: 1px solid var(--series-rule);
+    border-radius: 0.5rem;
+  }
+  .route strong {
+    color: var(--series-blue);
+  }
+  .route p {
+    margin: 0.65rem 0 0;
+    font-size: 0.9rem;
+    line-height: 1.65;
+  }
+  .route span {
+    display: block;
+    color: var(--series-secondary);
+    font-size: 0.8rem;
+  }
+  .caption {
+    margin: 1rem 0 0;
+    font-size: 0.85rem;
+    color: var(--series-secondary);
+    line-height: 1.65;
+  }
+  @container (max-width: 430px) {
+    .routes {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>
