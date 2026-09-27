@@ -57,13 +57,14 @@ export const codingAgentChapters = [
   {
     number: "08",
     title: "权限与信任——怎样控制 Agent 的执行风险",
-    question: "怎样控制项目资源加载和工具执行的风险，并限制操作可能造成的影响？",
+    question:
+      "怎样控制项目资源加载和工具执行的风险，并限制操作可能造成的影响？",
     postId: "coding-agent-08-trust",
   },
   {
     number: "09",
-    title: "扩展机制",
-    question: "怎样增加新工具、命令和自定义处理逻辑？",
+    title: "扩展机制——怎样增加能力与自定义行为",
+    question: "怎样通过扩展，让外部代码增加新能力或参与 Agent 的运行？",
     postId: "coding-agent-09-extensions",
   },
   {
