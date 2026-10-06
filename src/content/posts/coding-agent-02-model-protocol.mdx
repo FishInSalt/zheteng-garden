@@ -7,7 +7,7 @@ featured: false
 draft: false
 tags:
   - Coding Agent
-  - imp
+  - ink
   - Agent 原理
 description: 接着读取 README 的任务，看看 Agent 循环里的消息和工具定义，怎样转换成模型服务接收的请求，以及工具结果怎样在下一次调用中传回去。
 ---
@@ -33,7 +33,7 @@ Agent Loop（Agent 循环）把任务交给模型，模型请求读取文件，�
 
 图中的 **[Chat Completions API](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)** 和 **[Messages API](https://platform.claude.com/docs/en/api/messages/create)** 分别是 OpenAI 与 Anthropic 提供的模型调用接口：我们的代码向接口发送对话消息和工具说明，服务返回模型生成的回复。两者各自规定了请求和回复的数据格式，模型接入层需要按对应的格式收发数据。
 
-一家厂商也可以提供兼容其他厂商 API 的接口。例如，imp 的 [Z.ai 接入](https://github.com/FishInSalt/imp/blob/main/src/provider/zai.ts)复用了 Chat Completions 接入实现，再配置服务地址、密钥与兼容选项。因此，模型厂商和接入协议并不是一一对应的。
+一家厂商也可以提供兼容其他厂商 API 的接口。例如，Ink 的 [Z.ai 接入](https://github.com/FishInSalt/ink/blob/main/src/provider/zai.ts)复用了 Chat Completions 接入实现，再配置服务地址、密钥与兼容选项。因此，模型厂商和接入协议并不是一一对应的。
 
 这一章分成上下两篇。上篇先看消息和工具怎样发出去，下篇再看返回的流式数据怎样组成完整回复。
 
@@ -41,7 +41,7 @@ Agent Loop（Agent 循环）把任务交给模型，模型请求读取文件，�
 
 第 01 篇用 `streamAssistant` 等待一次完整回复。它内部调用 `provider.stream(request)`，实际与模型服务通信的是 provider。
 
-下面节选自 imp 的 [`openai-completions.ts`](https://github.com/FishInSalt/imp/blob/main/src/provider/openai-completions.ts)。这个文件实现了对接 **Chat Completions API** 的 provider，负责转换请求、调用模型服务，以及处理返回的回复。先留意三个动作：转换消息、提取工具说明、发送请求。不必马上记住每个字段。
+下面节选自 Ink 的 [`openai-completions.ts`](https://github.com/FishInSalt/ink/blob/main/src/provider/openai-completions.ts)。这个文件实现了对接 **Chat Completions API** 的 provider，负责转换请求、调用模型服务，以及处理返回的回复。先留意三个动作：转换消息、提取工具说明、发送请求。不必马上记住每个字段。
 
 代码保留主要调用和命名，省略类型、输出量配置、用量选项与兼容开关等细节，不能直接复制运行。
 
@@ -221,7 +221,7 @@ case "toolResult":
 
 转换完成后，请求中就同时包含了之前的任务、模型提出的读取请求，以及本地读取的结果。第 3 节会把两次请求完整列出来对照。
 
-如果换成 Messages API，同样的信息会放在不同的位置。例如，imp 的 [`anthropic.ts`](https://github.com/FishInSalt/imp/blob/main/src/provider/anthropic.ts) 把工具结果转换为用户消息里的 `tool_result` 内容块。连同前面讲过的系统指令，可以对照两种 API 的写法：
+如果换成 Messages API，同样的信息会放在不同的位置。例如，Ink 的 [`anthropic.ts`](https://github.com/FishInSalt/ink/blob/main/src/provider/anthropic.ts) 把工具结果转换为用户消息里的 `tool_result` 内容块。连同前面讲过的系统指令，可以对照两种 API 的写法：
 
 <div className="overflow-x-auto" tabIndex={0} role="region" aria-label="模型协议字段对照，可横向滚动">
 
@@ -311,7 +311,7 @@ if (!response.ok || !response.body) {
 
 ### 4.2 暂时失败时，有限重试
 
-本例的 [`postJsonWithRetry`](https://github.com/FishInSalt/imp/blob/main/src/provider/shared.ts) 对连接错误和 `429`、`500`、`502`、`503`、`504` 响应最多额外重试两次，分别等待 600 和 1500 毫秒。
+本例的 [`postJsonWithRetry`](https://github.com/FishInSalt/ink/blob/main/src/provider/shared.ts) 对连接错误和 `429`、`500`、`502`、`503`、`504` 响应最多额外重试两次，分别等待 600 和 1500 毫秒。
 
 **这只是简化策略，还不能当作生产环境的最佳实践。** 实际接入应先判断错误是否可能恢复，再遵循服务端有效的 `Retry-After` 等待提示；没有提示时，通常采用有上限的指数退避与随机抖动，也就是逐步拉长等待间隔，并让客户端错开重试时间。同时限制次数、单次请求和总耗时，超出预算就停止。可参考 [Anthropic 限流文档](https://platform.claude.com/docs/en/api/rate-limits)和 [AWS 的退避说明](https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/)。
 
@@ -327,4 +327,4 @@ if (!response.ok || !response.body) {
 
 请求被接受后，返回的内容往往会分批到达。下一篇[《模型接入：流式响应与组装》](/posts/coding-agent-02-streaming/)继续看：半截工具参数该存在哪里，什么时候才算拿到一条可以交给 Agent 循环的完整回复。
 
-协议字段可对照 [OpenAI 的函数调用文档](https://developers.openai.com/api/docs/guides/function-calling)；本文的转换和错误处理以链接的 imp 源码为例。
+协议字段可对照 [OpenAI 的函数调用文档](https://developers.openai.com/api/docs/guides/function-calling)；本文的转换和错误处理以链接的 Ink 源码为例。

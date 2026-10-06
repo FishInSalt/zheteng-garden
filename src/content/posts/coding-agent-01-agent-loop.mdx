@@ -7,7 +7,7 @@ featured: false
 draft: false
 tags:
   - Coding Agent
-  - imp
+  - ink
   - Agent 原理
 description: 从“读取 README，告诉我项目怎样启动”开始，结合带注释的源码节选和逐步演示，理解 Agent Loop 怎样调用模型、执行工具、传回结果，以及处理错误和中断。
 ---
@@ -30,7 +30,7 @@ import AgentLoopDemo from "@/components/series/AgentLoopDemo.astro";
 
 先看执行循环的整体结构。暂时不用理解每个参数，留意模型在哪里被调用、工具在哪里执行，以及循环什么时候结束。
 
-下面节选自 imp 的 [`src/core/loop.ts`](https://github.com/FishInSalt/imp/blob/main/src/core/loop.ts)，保留主要语句和命名，并加上中文注释。代码保留上限、中断等检查的位置，较长的处理分支在第 4 节展开。配置、用量统计等细节已省略，`...` 表示省略的参数；这段代码用于讲解，不能单独复制运行。
+下面节选自 Ink 的 [`src/core/loop.ts`](https://github.com/FishInSalt/ink/blob/main/src/core/loop.ts)，保留主要语句和命名，并加上中文注释。代码保留上限、中断等检查的位置，较长的处理分支在第 4 节展开。配置、用量统计等细节已省略，`...` 表示省略的参数；这段代码用于讲解，不能单独复制运行。
 
 ```ts
 // history 和 tools 由调用者传入，新对话的 history 从空数组开始。
@@ -119,7 +119,7 @@ const assistant = await streamAssistant({
 
 ### 2.2 检查回复：结束还是执行工具
 
-第 ② 步处理模型返回的 `assistant`。假设模型要求读取 README，这条回复就会包含一次工具请求。下面是它的精简示例。这里使用 imp 的内部消息格式，模型接入层负责转换不同服务的格式：
+第 ② 步处理模型返回的 `assistant`。假设模型要求读取 README，这条回复就会包含一次工具请求。下面是它的精简示例。这里使用 Ink 的内部消息格式，模型接入层负责转换不同服务的格式：
 
 ```json
 {

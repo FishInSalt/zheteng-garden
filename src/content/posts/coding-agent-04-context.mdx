@@ -7,7 +7,7 @@ featured: false
 draft: false
 tags:
   - Coding Agent
-  - imp
+  - ink
   - Agent 原理
 description: 用修复求和函数的任务，解释每次模型调用需要哪些信息、上下文预算怎样估算，以及历史太长时怎样压缩并继续工作。
 ---
@@ -55,7 +55,7 @@ import ContextCompactionCompare from "@/components/series/ContextCompactionCompa
 
 以 OpenAI 的 Chat Completions API 为例，`messages` 携带消息，通过 `role` 区分行为要求、用户输入、模型回复和工具结果：行为要求使用 `system` 或 `developer` 角色，具体取决于所选模型；用户输入、模型回复和工具结果分别使用 `user`、`assistant` 和 `tool`。工具定义则放在独立的 `tools` 字段中。[OpenAI API 文档](https://developers.openai.com/api/reference/cli/resources/chat)
 
-imp 内部将系统指令单独保存在 `system`，对话历史放在 `messages`，可用工具放在 `tools`。它的 Chat Completions 适配器再把 `system` 转成一条 `role: "system"` 的消息，放入发给服务的 `messages` 中。因此，下面的三个字段是 imp 的内部组织方式，不是 Chat Completions API 的三个同名顶层字段：
+Ink 内部将系统指令单独保存在 `system`，对话历史放在 `messages`，可用工具放在 `tools`。它的 Chat Completions 适配器再把 `system` 转成一条 `role: "system"` 的消息，放入发给服务的 `messages` 中。因此，下面的三个字段是 Ink 的内部组织方式，不是 Chat Completions API 的三个同名顶层字段：
 
 ```ts
 // 文件：src/provider/types.ts
@@ -68,13 +68,13 @@ export interface LLMRequest {
 }
 ```
 
-下面按字段对照 imp 中这些信息的来源，以及各字段通常保存的内容：
+下面按字段对照 Ink 中这些信息的来源，以及各字段通常保存的内容：
 
 <ContextRequestMap />
 
 用户提出的“不改公共接口”保留在用户消息中，也就是 `messages`；它不会因为是一条约束，就自动移到 `system`。
 
-以项目约定为例，imp 在 [`runner.ts`](https://github.com/FishInSalt/imp/blob/main/src/runner.ts) 中把它加入 `system`：
+以项目约定为例，Ink 在 [`runner.ts`](https://github.com/FishInSalt/ink/blob/main/src/runner.ts) 中把它加入 `system`：
 
 ```ts
 // 文件：src/runner.ts
@@ -89,7 +89,7 @@ if (!this.options.noContextFiles) {
 }
 ```
 
-`buildSystemPrompt` 提供基础指令和运行环境；`loadContextFiles` 读取项目约定。当前实现先查找 `~/.imp/AGENTS.md`，再从根目录到工作目录依次查找沿途的 `AGENTS.md`，把找到的内容拼接起来。因此，用户可以在项目根目录添加 `AGENTS.md`，写明编码规范、测试方式等要求，供 Agent 执行任务时遵循。
+`buildSystemPrompt` 提供基础指令和运行环境；`loadContextFiles` 读取项目约定。当前实现先查找 `~/.ink/AGENTS.md`，再从根目录到工作目录依次查找沿途的 `AGENTS.md`，把找到的内容拼接起来。因此，用户可以在项目根目录添加 `AGENTS.md`，写明编码规范、测试方式等要求，供 Agent 执行任务时遵循。
 
 这些约定由用户或项目维护者编写，Agent 负责加载；规则冲突和信任边界留到第 08 章讨论。
 
@@ -103,11 +103,11 @@ if (!this.options.noContextFiles) {
 
 当前主流的 Coding Agent 通常会结合多种手段管理上下文。例如，Claude Code 按需加载工具说明，并让子代理在独立上下文中工作，减少主对话积累的内容；历史接近上限时，先清理较早的工具输出，必要时再总结对话。[Claude Code 官方说明](https://code.claude.com/docs/en/how-claude-code-works#when-context-fills-up) Gemini CLI 也支持用摘要替换对话历史，减少后续调用占用的 Token。[Gemini CLI 官方说明](https://geminicli.com/docs/reference/commands/#compress) 这些做法的共同目标，是用更少的内容保留任务进展和关键依据，让模型能够继续工作。压缩结果不一定是文字摘要，例如 OpenAI 的压缩接口会返回模型可继续使用的非明文压缩内容。[OpenAI 官方说明](https://developers.openai.com/api/docs/guides/compaction)
 
-这些方案既会控制进入上下文的信息量，也会整理已经积累的历史。对于不断增长的历史，一种常见处理方式是**上下文压缩**：用更少的内容保留继续任务所需的信息。下面看看 imp 怎样压缩历史、什么时候触发，以及压缩后怎样继续调用模型。
+这些方案既会控制进入上下文的信息量，也会整理已经积累的历史。对于不断增长的历史，一种常见处理方式是**上下文压缩**：用更少的内容保留继续任务所需的信息。下面看看 Ink 怎样压缩历史、什么时候触发，以及压缩后怎样继续调用模型。
 
 **怎样压缩历史**
 
-imp 采用的是“较早历史生成摘要、近期消息保留原文”的方式。压缩入口 `compactAndSplice` 通过 `compactSession` 调用 `compactHistory`，由后者完成历史切分和摘要生成。
+Ink 采用的是“较早历史生成摘要、近期消息保留原文”的方式。压缩入口 `compactAndSplice` 通过 `compactSession` 调用 `compactHistory`，由后者完成历史切分和摘要生成。
 
 切分时要保留一段近期消息的原文，因为其中可能包含正在处理的代码和最新错误。
 
@@ -180,7 +180,7 @@ Keep each section concise. Preserve exact file paths, function names, and error 
 
 **什么时候触发压缩**
 
-需要先估算当前上下文占用了多少 Token，再判断剩余空间是否充足。除了输入中的系统指令、工具说明和消息历史，还要为模型生成回复留出空间。imp 在 [`compaction.ts`](https://github.com/FishInSalt/imp/blob/main/src/core/compaction.ts) 中用下面的条件判断是否触发压缩：
+需要先估算当前上下文占用了多少 Token，再判断剩余空间是否充足。除了输入中的系统指令、工具说明和消息历史，还要为模型生成回复留出空间。Ink 在 [`compaction.ts`](https://github.com/FishInSalt/ink/blob/main/src/core/compaction.ts) 中用下面的条件判断是否触发压缩：
 
 ```ts
 // 文件：src/core/compaction.ts
@@ -192,7 +192,7 @@ export function shouldCompact(contextTokens, settings) {
 
 `contextWindow` 是所选模型的窗口配置，`reserveTokens` 是提前留出的余量。它不是每次请求的 `maxTokens`：后者限制这一次生成的输出，两者需要配合设置。
 
-用一组简化数字看这个判断。下面的 32,000 和 8,000 仅用于演示，不是 imp 的默认配置：
+用一组简化数字看这个判断。下面的 32,000 和 8,000 仅用于演示，不是 Ink 的默认配置：
 
 | 时刻                                | 估算占用     | 压缩阈值                | 判断                 |
 | ----------------------------------- | ------------ | ----------------------- | -------------------- |
@@ -201,9 +201,9 @@ export function shouldCompact(contextTokens, settings) {
 
 `contextTokens` 由 `estimateContextTokens` 估算：优先参考最近一次模型调用返回的用量，再估算之后新增消息的长度；没有可用的用量记录时，就根据消息内容估算。
 
-估算并不等于准确计数。当前 imp 对未测量的内容采用字符数除以 4 的近似方法，首次估算也没有单独计入系统指令和工具说明。因此，这个判断只能帮助提前触发压缩，仍需要处理模型服务返回的超限错误。生成摘要本身也需要调用模型，应提前预留空间，不能等上下文完全装不下时才处理。
+估算并不等于准确计数。当前 Ink 对未测量的内容采用字符数除以 4 的近似方法，首次估算也没有单独计入系统指令和工具说明。因此，这个判断只能帮助提前触发压缩，仍需要处理模型服务返回的超限错误。生成摘要本身也需要调用模型，应提前预留空间，不能等上下文完全装不下时才处理。
 
-长度检查放在每次模型调用前。Agent 循环通过 `onBeforeTurn` 留出检查和整理历史的位置；处理完成后，再把当前的 `history` 交给模型。下面节选自 [`loop.ts`](https://github.com/FishInSalt/imp/blob/main/src/core/loop.ts)，省略类型和非主线分支，不能单独运行：
+长度检查放在每次模型调用前。Agent 循环通过 `onBeforeTurn` 留出检查和整理历史的位置；处理完成后，再把当前的 `history` 交给模型。下面节选自 [`loop.ts`](https://github.com/FishInSalt/ink/blob/main/src/core/loop.ts)，省略类型和非主线分支，不能单独运行：
 
 ```ts
 // 文件：src/core/loop.ts
@@ -213,7 +213,15 @@ await onBeforeTurn?.(history); // 调用前检查，必要时更新历史。
 
 const assistant = await streamAssistant({
   provider,
-  request: { system, messages: history, tools, model, maxTokens, thinking, signal },
+  request: {
+    system,
+    messages: history,
+    tools,
+    model,
+    maxTokens,
+    thinking,
+    signal,
+  },
   onEvent,
   usage,
 });
@@ -248,7 +256,11 @@ onBeforeTurn: session
 // 节选：省略 session 的获取与空值检查、思考配置和界面提示。
 const compacted = await compactSession({ session, provider, model, settings });
 if (compacted) {
-  this.history.splice(0, this.history.length, ...session.buildContext().messages);
+  this.history.splice(
+    0,
+    this.history.length,
+    ...session.buildContext().messages
+  );
 }
 return compacted !== null;
 ```

@@ -7,7 +7,7 @@ featured: false
 draft: false
 tags:
   - Coding Agent
-  - imp
+  - ink
   - Agent 原理
 description: 从给 Agent 增加一种能力出发，解释工具怎样定义、注册、校验和执行，怎样统一返回结果，以及取消与并发调度需要约定什么。
 ---
@@ -26,10 +26,10 @@ import ToolDefinitionMap from "@/components/series/ToolDefinitionMap.astro";
 
 **调用模型前，准备好可用工具：**
 
-1. 为每个工具定义名称、用途、参数要求和执行函数。接口定义见 [`tools/types.ts`](https://github.com/FishInSalt/imp/blob/main/src/core/tools/types.ts)。
-2. 确定本次运行可用的工具集合，相关初始化见 [`runner.ts`](https://github.com/FishInSalt/imp/blob/main/src/runner.ts)。模型接入层将工具的名称、用途和参数要求发送给模型，执行函数保留在本地。
+1. 为每个工具定义名称、用途、参数要求和执行函数。接口定义见 [`tools/types.ts`](https://github.com/FishInSalt/ink/blob/main/src/core/tools/types.ts)。
+2. 确定本次运行可用的工具集合，相关初始化见 [`runner.ts`](https://github.com/FishInSalt/ink/blob/main/src/runner.ts)。模型接入层将工具的名称、用途和参数要求发送给模型，执行函数保留在本地。
 
-**模型回复中包含工具调用时，处理逻辑见 [`loop.ts`](https://github.com/FishInSalt/imp/blob/main/src/core/loop.ts)：**
+**模型回复中包含工具调用时，处理逻辑见 [`loop.ts`](https://github.com/FishInSalt/ink/blob/main/src/core/loop.ts)：**
 
 1. 根据工具名称找到对应实现，检查调用参数是否符合要求，以及本次操作是否允许执行。
 2. 执行工具，将输出或错误整理成统一的结果，交回 Agent 循环。
@@ -43,14 +43,21 @@ import ToolDefinitionMap from "@/components/series/ToolDefinitionMap.astro";
 // 所在函数：runAgentLoop
 // 节选：省略类型、事件通知及下方标出的步骤，不能直接运行。
 // 初始化：tools 是本次可用的工具集合。
-const toolMap = new Map(tools.map((t) => [t.name, t]));
+const toolMap = new Map(tools.map(t => [t.name, t]));
 
 // ……省略调用模型、接收并保存回复等中间代码。
 // 收到并保存模型回复后：取出其中的工具调用。
-const toolCalls = assistant.blocks.filter((b) => b.type === "toolCall");
+const toolCalls = assistant.blocks.filter(b => b.type === "toolCall");
 // 省略没有工具调用、达到轮次上限时的结束判断。
 const results = [];
-await executeToolBatch(toolCalls, toolMap, signal, onToolCall, onEvent, results);
+await executeToolBatch(
+  toolCalls,
+  toolMap,
+  signal,
+  onToolCall,
+  onEvent,
+  results
+);
 ```
 
 循环初始化时，用本次可用的 `tools` 建立 `toolMap`，保存工具名称与实现的对应关系。
@@ -73,7 +80,12 @@ await executeToolBatch(toolCalls, toolMap, signal, onToolCall, onEvent, results)
 // 省略遍历、取消检查、串行/并发判断和事件通知。
 const call = toolCalls[i];
 const result = await executeToolCall(
-  call.id, call.name, call.arguments, toolMap, signal, onToolCall
+  call.id,
+  call.name,
+  call.arguments,
+  toolMap,
+  signal,
+  onToolCall
 );
 results.push(result);
 ```
@@ -114,7 +126,7 @@ async function executeToolCall(id, name, args, toolMap, signal, onToolCall) {
 
 ### 2.1 定义工具：统一接口包含哪些信息
 
-一个工具既要让模型知道如何使用，也要让本地知道如何执行。imp 的 `Tool` 接口将这些信息放在同一个对象里：
+一个工具既要让模型知道如何使用，也要让本地知道如何执行。Ink 的 `Tool` 接口将这些信息放在同一个对象里：
 
 ```ts
 // 文件：src/core/tools/types.ts
@@ -124,7 +136,10 @@ interface Tool {
   description: string;
   parameters: TSchema;
   concurrencySafe?: boolean;
-  execute(args: Record<string, unknown>, signal: AbortSignal): Promise<{
+  execute(
+    args: Record<string, unknown>,
+    signal: AbortSignal
+  ): Promise<{
     output: string;
     isError?: boolean;
   }>;
@@ -145,7 +160,7 @@ interface Tool {
 
 ### 2.2 注册工具：让模型能选择，让 Agent 能执行
 
-定义好工具后，还要把它加入本次运行。imp 的 [`runner.ts`](https://github.com/FishInSalt/imp/blob/main/src/runner.ts) 负责创建工具集合，再传给 Agent 循环：
+定义好工具后，还要把它加入本次运行。Ink 的 [`runner.ts`](https://github.com/FishInSalt/ink/blob/main/src/runner.ts) 负责创建工具集合，再传给 Agent 循环：
 
 ```ts
 // 文件：src/runner.ts
@@ -178,7 +193,7 @@ this.tools = [
 - **发出了工具说明，却没有注册对应实现**：模型可能选择这个工具，但 Agent 无法在本次运行的 `toolMap` 中找到它。
 - **注册了实现，却没有发送工具说明**：模型无法从提供的工具列表中得知这项能力。
 
-同一次运行中，工具名称还应保持唯一，否则不同实现会争用同一个查找名称。当前 imp 建立 `toolMap` 时，遇到同名工具会保留后加入的对象，覆盖前一个。如果希望在重名时直接报错，需要在注册工具时显式检查。
+同一次运行中，工具名称还应保持唯一，否则不同实现会争用同一个查找名称。当前 Ink 建立 `toolMap` 时，遇到同名工具会保留后加入的对象，覆盖前一个。如果希望在重名时直接报错，需要在注册工具时显式检查。
 
 ### 2.3 调用前检查：工具执行前要检查什么
 
@@ -215,7 +230,7 @@ function prepareToolCall(call, toolMap) {
     return { result: { isError: true /* 不符合该工具的参数规则 */ } };
   }
 
-  return { run: (signal) => runTool(call, tool, record, signal) };
+  return { run: signal => runTool(call, tool, record, signal) };
 }
 ```
 
@@ -248,7 +263,8 @@ function prepareToolCall(call, toolMap) {
 async function runTool(call, tool, record, signal) {
   try {
     const result = await tool.execute(
-      record, signal ?? new AbortController().signal
+      record,
+      signal ?? new AbortController().signal
     );
     return {
       toolCallId: call.id,
@@ -282,7 +298,12 @@ async function runTool(call, tool, record, signal) {
 // 节选：省略类型、中断后的结果补齐、结束判断与消息通知。
 const results = [];
 await executeToolBatch(
-  toolCalls, toolMap, signal, onToolCall, onEvent, results
+  toolCalls,
+  toolMap,
+  signal,
+  onToolCall,
+  onEvent,
+  results
 );
 
 // ……省略中断后的结果补齐与结束判断。
@@ -302,11 +323,11 @@ history.push(toolResults);
 
 但“修改启动脚本，再运行测试”就有先后关系：测试必须在修改完成后执行。如果测试命令还需要根据修改结果决定，就应该先把修改结果交回模型，再由模型发起下一次调用。**模型一次给出多个工具调用，并不代表它们都可以同时执行。**
 
-**当前 imp 怎样安排执行**
+**当前 Ink 怎样安排执行**
 
 沿用前面的例子，模型在一条回复中同时要求读取 `README.md` 和 `package.json`。Agent 循环取出这两次工具调用后，会交给 `executeToolBatch`，由它决定是依次执行，还是并发执行。
 
-这个函数位于 [`loop.ts`](https://github.com/FishInSalt/imp/blob/main/src/core/loop.ts)。它读取每个工具的 `concurrencySafe` 标记，先确定执行方式：
+这个函数位于 [`loop.ts`](https://github.com/FishInSalt/ink/blob/main/src/core/loop.ts)。它读取每个工具的 `concurrencySafe` 标记，先确定执行方式：
 
 | 工具的标记                               | 执行方式                                                |
 | ---------------------------------------- | ------------------------------------------------------- |
@@ -322,7 +343,7 @@ history.push(toolResults);
 3. **收集结果**：等待整批完成，再按原调用顺序保存结果、发送 `tool_end`，不会按完成先后打乱排列。
 4. **继续下一批**：当前批次处理完后，`executeToolBatch` 才启动下一批。
 
-目前内置工具中，只有用于委派子代理任务的 [`task`](https://github.com/FishInSalt/imp/blob/main/src/core/tools/task.ts) 显式设置了 `concurrencySafe: true`。它的说明要求只委派相互独立的任务；这个标记本身不会检查两个子代理是否修改了同一个文件。这里的 5 是当前调度批次的上限，也不是整个系统中所有子代理和工具调用的全局上限。
+目前内置工具中，只有用于委派子代理任务的 [`task`](https://github.com/FishInSalt/ink/blob/main/src/core/tools/task.ts) 显式设置了 `concurrencySafe: true`。它的说明要求只委派相互独立的任务；这个标记本身不会检查两个子代理是否修改了同一个文件。这里的 5 是当前调度批次的上限，也不是整个系统中所有子代理和工具调用的全局上限。
 
 **当前设计的取舍与局限**
 
@@ -345,7 +366,7 @@ history.push(toolResults);
 - **执行控制**：调用开始前怎样检查参数和权限，执行过程中怎样处理取消、超时与失败？
 - **结果交付**：怎样将结果与原调用对应，及时反馈执行状态，并完整保留成功、失败或取消的结果？
 
-当前 imp 通过并发标记和固定批次实现了基础调度，还没有根据具体调用的依赖与资源冲突来安排执行。后续是否扩展这些能力，可以结合实际任务的复杂度逐步决定。
+当前 Ink 通过并发标记和固定批次实现了基础调度，还没有根据具体调用的依赖与资源冲突来安排执行。后续是否扩展这些能力，可以结合实际任务的复杂度逐步决定。
 
 ## 3. 两个工具，怎样接入同一套系统
 
@@ -353,13 +374,15 @@ history.push(toolResults);
 
 ### 3.1 read：接收路径，返回文件内容
 
-下面节选自 [`read.ts`](https://github.com/FishInSalt/imp/blob/main/src/core/tools/read.ts)。保留工具定义、路径检查、读取操作和返回结果；缩短了工具说明，省略 `offset`、`limit` 参数及内容裁剪细节。注释标出了省略位置，代码不能单独运行。
+下面节选自 [`read.ts`](https://github.com/FishInSalt/ink/blob/main/src/core/tools/read.ts)。保留工具定义、路径检查、读取操作和返回结果；缩短了工具说明，省略 `offset`、`limit` 参数及内容裁剪细节。注释标出了省略位置，代码不能单独运行。
 
 ```ts
 // 文件：src/core/tools/read.ts
 // 模块级参数定义；下方为创建工具的函数。
 const readSchema = Type.Object({
-  path: Type.String({ description: "Path to the file to read (relative or absolute)" }),
+  path: Type.String({
+    description: "Path to the file to read (relative or absolute)",
+  }),
   // 省略 offset、limit 两个可选参数。
 });
 
@@ -382,12 +405,16 @@ export function createReadTool(options: ReadToolOptions = {}): Tool {
         bytes = await readFile(absolute, { signal });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        return { output: `Error reading ${requested}: ${message}`, isError: true };
+        return {
+          output: `Error reading ${requested}: ${message}`,
+          isError: true,
+        };
       }
 
       // 省略二进制检查、解码、行范围检查与裁剪。
       // 这些代码从 bytes 得到 selected（正文）和 notes（裁剪说明）。
-      const output = notes.length > 0 ? `${selected}\n\n${notes.join("\n")}` : selected;
+      const output =
+        notes.length > 0 ? `${selected}\n\n${notes.join("\n")}` : selected;
       return { output, isError: false };
     },
   };
@@ -407,7 +434,7 @@ export function createReadTool(options: ReadToolOptions = {}): Tool {
 
 运行测试需要等待命令启动、输出内容、最后退出。虽然过程比读取文件复杂，对调用层来说，仍然是等待 `execute` 返回一个结果。
 
-下面节选自 [`bash.ts`](https://github.com/FishInSalt/imp/blob/main/src/core/tools/bash.ts)，先看正常执行和启动失败的路径。工具说明已缩短，超时、取消和输出缓冲的实现省略；其中 `finish` 是源码里的收尾函数，负责防止重复返回、清理超时计时器与中断监听器，最后调用 `resolve(result)`。
+下面节选自 [`bash.ts`](https://github.com/FishInSalt/ink/blob/main/src/core/tools/bash.ts)，先看正常执行和启动失败的路径。工具说明已缩短，超时、取消和输出缓冲的实现省略；其中 `finish` 是源码里的收尾函数，负责防止重复返回、清理超时计时器与中断监听器，最后调用 `resolve(result)`。
 
 ```ts
 // 文件：src/core/tools/bash.ts
@@ -429,25 +456,37 @@ export function createBashTool(options: BashToolOptions = {}): Tool {
         return { output: "Error: empty command", isError: true };
       }
       // 省略 timeout 参数检查。
-      return new Promise<ToolExecuteResult>((resolve) => {
+      return new Promise<ToolExecuteResult>(resolve => {
         const child = spawn("/bin/bash", ["-c", command], {
           cwd,
-          env: { ...process.env, IMP: "1" },
+          env: { ...process.env, Ink: "1" },
         });
         const stdout = newState();
         const stderr = newState();
         // 省略计时器、signal 监听和 finish 的定义；下方单独看取消逻辑。
 
         // 收集命令输出，尚未向调用层交付最终结果。
-        child.stdout.on("data", (chunk: Buffer) => appendChunk(stdout, chunk.toString("utf8")));
-        child.stderr.on("data", (chunk: Buffer) => appendChunk(stderr, chunk.toString("utf8")));
-        child.on("error", (err) => {
-          finish({ output: `Error: failed to spawn command: ${err.message}`, isError: true });
+        child.stdout.on("data", (chunk: Buffer) =>
+          appendChunk(stdout, chunk.toString("utf8"))
+        );
+        child.stderr.on("data", (chunk: Buffer) =>
+          appendChunk(stderr, chunk.toString("utf8"))
+        );
+        child.on("error", err => {
+          finish({
+            output: `Error: failed to spawn command: ${err.message}`,
+            isError: true,
+          });
         });
-        child.on("close", async (code) => {
+        child.on("close", async code => {
           // 源码先处理超时和取消：返回错误及已有输出，并提前结束。
           // 这里省略这两个分支，只保留正常退出路径。
-          const output = await formatOutput(stdout, stderr, command, code ?? undefined);
+          const output = await formatOutput(
+            stdout,
+            stderr,
+            command,
+            code ?? undefined
+          );
           finish({ output, isError: false, exitCode: code ?? undefined });
         });
       });
@@ -458,7 +497,7 @@ export function createBashTool(options: BashToolOptions = {}): Tool {
 
 `spawn` 启动命令后，输出和退出通知会陆续到达。这里用一个 Promise 把这些事件接起来：`data` 事件收集输出，`error` 或 `close` 事件进入收尾逻辑，再通过 `finish` 交付结果。调用层不需要知道进程事件的细节，只需等待这个 Promise。
 
-`formatOutput` 负责整理标准输出、标准错误和退出状态。注意正常退出路径中的 `isError: false`：在当前 imp 中，它不能保证命令执行成功。非零退出码会写进 `output`，工具也额外返回 `exitCode`；第 2.4 节的通用包装只取 `output` 和 `isError`，因此模型要从输出中判断测试是否通过。
+`formatOutput` 负责整理标准输出、标准错误和退出状态。注意正常退出路径中的 `isError: false`：在当前 Ink 中，它不能保证命令执行成功。非零退出码会写进 `output`，工具也额外返回 `exitCode`；第 2.4 节的通用包装只取 `output` 和 `isError`，因此模型要从输出中判断测试是否通过。
 
 再看刚才省略的中断监听，它位于同一个 Promise 内部：
 
@@ -505,7 +544,7 @@ signal.addEventListener("abort", onAbort, { once: true });
 if (!Value.Check(tool.parameters, record)) {
   const issues = [...Value.Errors(tool.parameters, record)]
     .slice(0, 5)
-    .map((e) => `${e.instancePath || "(root)"}: ${e.message}`)
+    .map(e => `${e.instancePath || "(root)"}: ${e.message}`)
     .join("; ");
   return {
     result: {
@@ -550,7 +589,7 @@ const timer =
 
 到期后，这段代码会向子进程发送终止信号，而不只是停止等待 Promise。后续 `close` 处理会返回超时原因和已经收集的输出，`finish` 则清理计时器与中断监听器。和第 3.2 节的取消处理一样，这里终止的是直接启动的子进程，不能据此保证所有后代进程都已停止。
 
-当前 imp 的通用工具接口没有统一的超时字段，`bash` 在内部处理自己的超时。无论取消或超时由谁触发，都需要让实际操作响应停止要求，并在结果中说明中断原因；仅让界面停止显示，后台操作仍可能继续。
+当前 Ink 的通用工具接口没有统一的超时字段，`bash` 在内部处理自己的超时。无论取消或超时由谁触发，都需要让实际操作响应停止要求，并在结果中说明中断原因；仅让界面停止显示，后台操作仍可能继续。
 
 即使操作已经停止，之前写入的内容也不会自动恢复。**取消或超时都不等于回滚**，再次执行前仍要确认已有修改。
 

@@ -6,7 +6,7 @@ featured: false
 draft: false
 tags:
   - Coding Agent
-  - imp
+  - ink
   - Agent 原理
 description: 从查看进展、提前安排任务、执行中纠偏和中断四种交互出发，解释 Agent 的事件反馈、输入队列、取消机制，以及中断或失败后的恢复。
 ---
@@ -23,7 +23,7 @@ import AsyncExecutionTimeline from "@/components/series/AsyncExecutionTimeline.a
 - **追加要求、纠正方向**：发现 Agent 的理解有偏差，及时补充信息，让它在后续执行中调整做法。
 - **中断执行**：发现 Agent 正在进行预期之外的操作，主动要求它停止。
 
-imp 也支持这些交互。这些交互是怎样实现的？运行进展怎样传回界面？提前提交的下一项任务怎样排队，并在当前运行结束后开始执行？追加的信息怎样交给正在工作的 Agent，让它调整后续行动？用户要求停止时，又怎样通知正在调用的模型和工具？
+Ink 也支持这些交互。这些交互是怎样实现的？运行进展怎样传回界面？提前提交的下一项任务怎样排队，并在当前运行结束后开始执行？追加的信息怎样交给正在工作的 Agent，让它调整后续行动？用户要求停止时，又怎样通知正在调用的模型和工具？
 
 **本篇就沿着这些问题，解释 Agent 怎样在持续执行任务的同时，接收并响应用户的操作。** 具体的界面布局与渲染，留到第 07 篇展开。
 
@@ -43,7 +43,7 @@ imp 也支持这些交互。这些交互是怎样实现的？运行进展怎样�
 
 <AgentInteractionFlow />
 
-在 imp 中，这部分协调逻辑主要位于 [`repl/repl.ts`](https://github.com/FishInSalt/imp/blob/main/src/repl/repl.ts) 的 `ReplMachine` 中。先看它怎样启动一次运行，并接入进展通知、追加输入和取消信号；后面的各小节再分别展开。
+在 Ink 中，这部分协调逻辑主要位于 [`repl/repl.ts`](https://github.com/FishInSalt/ink/blob/main/src/repl/repl.ts) 的 `ReplMachine` 中。先看它怎样启动一次运行，并接入进展通知、追加输入和取消信号；后面的各小节再分别展开。
 
 其中，`runner.runTurn` 是启动一次 Agent 运行的入口，内部会准备上下文并调用 Agent 循环。下面保留源码的主要变量和调用，省略界面装饰、统计与其他分支，不能直接复制运行。
 
@@ -60,7 +60,7 @@ try {
   const result = await this.runner.runTurn({
     userMessage: line,
     signal: controller.signal, // 2.4：向模型接入层和工具传递取消通知
-    onEvent: (event) => {
+    onEvent: event => {
       this.renderer.event(event); // 2.1：接收运行进展，更新显示
       this.trackActivity(event);
     },
@@ -80,7 +80,7 @@ Agent 开始修复求和函数时，模型可能先回答“我先查看函数�
 
 **先看模型文字怎样逐段显示。**
 
-第 02 下篇已经介绍过，模型服务会陆续返回内容，接入层负责解析这些片段。以 [`openai-completions.ts`](https://github.com/FishInSalt/imp/blob/main/src/provider/openai-completions.ts) 为例，拿到一段文字后，接入层会向外产出一个对象：
+第 02 下篇已经介绍过，模型服务会陆续返回内容，接入层负责解析这些片段。以 [`openai-completions.ts`](https://github.com/FishInSalt/ink/blob/main/src/provider/openai-completions.ts) 为例，拿到一段文字后，接入层会向外产出一个对象：
 
 ```ts
 // 文件：src/provider/openai-completions.ts
@@ -112,7 +112,7 @@ for await (const event of provider.stream(request)) {
 
 **再看工具状态怎样更新。**
 
-模型回复中包含读取调用后，Agent 循环开始处理工具。此时需要反馈的是“开始处理哪次调用”和“这次调用得到了什么结果”。[`executeToolBatch`](https://github.com/FishInSalt/imp/blob/main/src/core/loop.ts) 在调用前后分别发出通知：
+模型回复中包含读取调用后，Agent 循环开始处理工具。此时需要反馈的是“开始处理哪次调用”和“这次调用得到了什么结果”。[`executeToolBatch`](https://github.com/FishInSalt/ink/blob/main/src/core/loop.ts) 在调用前后分别发出通知：
 
 ```ts
 // 文件：src/core/loop.ts
@@ -126,7 +126,12 @@ onEvent?.({
 });
 
 const result = await executeToolCall(
-  call.id, call.name, call.arguments, toolMap, signal, onToolCall,
+  call.id,
+  call.name,
+  call.arguments,
+  toolMap,
+  signal,
+  onToolCall
 );
 
 onEvent?.({ type: "tool_end", result });
@@ -138,7 +143,7 @@ onEvent?.({ type: "tool_end", result });
 
 **两类信息，通过同一套运行事件传给交互层。**
 
-前面这些对象都在描述 Agent 运行期间发生的变化，本篇将它们称为**运行事件**。`type` 区分变化类型，其余字段携带对应信息：文字片段放在 `text`，工具开始信息包含名称和参数，工具结束信息包含结果。它们是 imp 的内部事件，并非模型服务统一规定的格式。
+前面这些对象都在描述 Agent 运行期间发生的变化，本篇将它们称为**运行事件**。`type` 区分变化类型，其余字段携带对应信息：文字片段放在 `text`，工具开始信息包含名称和参数，工具结束信息包含结果。它们是 Ink 的内部事件，并非模型服务统一规定的格式。
 
 渲染器收到事件后，根据 `type` 决定追加文字还是更新工具显示：
 
@@ -165,7 +170,7 @@ switch (event.type) {
 
 假设 Agent 正在修复求和函数，你已经想好下一步：“修复后，再写一份修改说明。” 修改尚未结束，现在就开始写说明还太早；但也不必让用户一直等着。Agent 可以先保存这条输入，等当前运行结束后再处理。
 
-在 imp 中，这种等待当前运行结束后再处理的输入称为 **`followUp` 模式**，用户通过 Alt+Enter 提交。
+在 Ink 中，这种等待当前运行结束后再处理的输入称为 **`followUp` 模式**，用户通过 Alt+Enter 提交。
 
 收到输入时，交互层先检查当前是否空闲：空闲就立即启动运行；否则先把输入加入队列。
 
@@ -208,7 +213,7 @@ await this.submitTurn(entryText(next)); // 取出下一条文字，启动后续�
 
 这里会取出队首的剩余输入，并不按 `mode` 筛选；这对另一种输入模式的影响，下一节再讨论。
 
-注意，这里等待的是运行结束，不是确认任务已经完成。当前 imp 即使因达到循环次数上限而结束，也会继续处理排队输入；如果后续任务依赖前一项成功，应该先检查结束原因和任务结果，再决定是否继续。中断或失败时不自动续跑，具体处理见第 3 节。
+注意，这里等待的是运行结束，不是确认任务已经完成。当前 Ink 即使因达到循环次数上限而结束，也会继续处理排队输入；如果后续任务依赖前一项成功，应该先检查结束原因和任务结果，再决定是否继续。中断或失败时不自动续跑，具体处理见第 3 节。
 
 ### 2.3 怎样在执行中补充要求、纠正方向？
 
@@ -233,7 +238,7 @@ await this.submitTurn(entryText(next)); // 取出下一条文字，启动后续�
 // 所在函数：ReplMachine.steeringMessages
 // 节选查找与取出逻辑；省略类型防御检查与界面提示。
 const index = this.queue.findIndex(
-  (entry) => "text" in entry && entry.mode === "steer" && !isBangLine(entry.text),
+  entry => "text" in entry && entry.mode === "steer" && !isBangLine(entry.text)
 );
 if (index === -1) return [];
 const picked = this.queue.splice(index, 1)[0];
@@ -278,7 +283,7 @@ for (const message of steering) {
 
 **可以怎样改进？**
 
-对于 imp 这样一次处理一项任务的交互方式，可以按下面的顺序处理：
+对于 Ink 这样一次处理一项任务的交互方式，可以按下面的顺序处理：
 
 1. **调用模型前，接收全部待处理的补充。** 按提交顺序取出此时已经收到的所有 `steer`，一起加入上下文，并从待处理队列中移除。请求发出后新到的消息，留到下一次检查时处理。
 2. **模型要求调用工具时，继续正常的 Agent 循环。** 执行工具、记录结果，再回到第 1 步，接收新的补充后调用模型。
@@ -289,7 +294,7 @@ for (const message of steering) {
 
 上述流程不能绕过中断、失败和运行上限：遇到这些情况，应暂停自动继续并保留未处理输入。一次接收多条补充时，也需要检查上下文容量，不能因超出预算而静默丢弃消息。
 
-这套处理顺序是改进建议，当前 imp 尚未实现。现有实现中，中断或失败后怎样交还剩余输入，见第 3 节。
+这套处理顺序是改进建议，当前 Ink 尚未实现。现有实现中，中断或失败后怎样交还剩余输入，见第 3 节。
 
 ### 2.4 怎样中断正在进行的工作？
 
@@ -327,7 +332,7 @@ if (signal?.aborted) return { stopReason: "aborted", turns, usage };
 
 这个检查防止循环继续推进，但已经开始的模型调用和工具操作，仍然需要各自响应信号。工具忽略取消通知，或底层操作无法立即取消时，运行就可能继续等待。
 
-所以，**“已请求停止”和“已经停止”是两个不同的状态。** imp 发出取消通知后仍保持 `running`，直到调用结束、完成收尾，才回到空闲状态。如果尚未结束时再次中断，当前实现会强制退出进程；这不等同于正常收尾。
+所以，**“已请求停止”和“已经停止”是两个不同的状态。** Ink 发出取消通知后仍保持 `running`，直到调用结束、完成收尾，才回到空闲状态。如果尚未结束时再次中断，当前实现会强制退出进程；这不等同于正常收尾。
 
 中断也不会撤销已经完成的修改。停止时，项目文件可能已经改过；此时结束的是这次 Agent 运行，修复任务是否完成，还要依据代码和测试结果判断。
 
