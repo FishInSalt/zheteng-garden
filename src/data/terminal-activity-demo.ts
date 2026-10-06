@@ -103,7 +103,7 @@ export const activityDemos: Record<
   timer: {
     title: "没有新结果，等待符号为什么还会动？",
     caption:
-      "观察同一个 bash 调用的 3 秒。按 imp 的 120ms 间隔演示，暂停会冻结演示时间；动画不代表实际进度。",
+      "观察同一个 bash 调用的 3 秒。按 Ink 的 120ms 间隔演示，暂停会冻结演示时间；动画不代表实际进度。",
     frames: [],
   },
 };

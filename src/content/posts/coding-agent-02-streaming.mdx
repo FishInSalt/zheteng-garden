@@ -7,7 +7,7 @@ featured: false
 draft: false
 tags:
   - Coding Agent
-  - imp
+  - ink
   - Agent 原理
 description: 从一次读取 README 的工具请求出发，逐步观察流式参数怎样拼接、完整回复何时交回循环，以及中断、截断和参数解析失败怎样处理。
 ---
@@ -28,7 +28,7 @@ import ProviderStreamDemo from "@/components/series/ProviderStreamDemo.astro";
 
 ## 2. 对照源码，看回复怎样组装起来
 
-下面仍以 imp 的 [`openai-completions.ts`](https://github.com/FishInSalt/imp/blob/main/src/provider/openai-completions.ts) 为例。上篇讲到 `provider.stream` 发出请求并取得 `response`。接下来，同一个函数会继续读取响应体，组装模型回复。
+下面仍以 Ink 的 [`openai-completions.ts`](https://github.com/FishInSalt/ink/blob/main/src/provider/openai-completions.ts) 为例。上篇讲到 `provider.stream` 发出请求并取得 `response`。接下来，同一个函数会继续读取响应体，组装模型回复。
 
 先看整体过程：**接收片段 → 累积文字和参数 → 检查结束状态 → 产出完整回复。**（可在[第 3 节的交互演示](#3-模拟运行半截路径怎样变成完整参数)中逐步观察这个过程。）
 
@@ -99,7 +99,7 @@ yield {
 
 接入层从响应体读到的最初是字节，一次读取可能只有半条事件，也可能含有好几条事件。因此，需要先识别完整事件，再提取其中的数据做 `JSON.parse`。
 
-核心代码通过 `parseSse(response.body)` 完成这一步。下面是 [`shared.ts`](https://github.com/FishInSalt/imp/blob/main/src/provider/shared.ts) 中的函数节选，`body` 就是传入的响应体；省略类型及释放 reader 的 `try/finally` 结构：
+核心代码通过 `parseSse(response.body)` 完成这一步。下面是 [`shared.ts`](https://github.com/FishInSalt/ink/blob/main/src/provider/shared.ts) 中的函数节选，`body` 就是传入的响应体；省略类型及释放 reader 的 `try/finally` 结构：
 
 ```ts
 async function* parseSse(body) {
@@ -287,7 +287,7 @@ throw new Error("Provider stream ended without a message_end event");
 | `tool_call_delta` | 传递该工具请求的一段参数字符串                               |
 | `message_end`     | 携带组装后的完整消息，供 Agent 循环继续处理                  |
 
-模型接入层把不同服务的响应转换成这些事件，Agent 循环和交互层因此可以按同一套方式处理接收进度。源码把这套事件定义为 `LLMEvent`，见 [`provider/types.ts`](https://github.com/FishInSalt/imp/blob/main/src/provider/types.ts)。
+模型接入层把不同服务的响应转换成这些事件，Agent 循环和交互层因此可以按同一套方式处理接收进度。源码把这套事件定义为 `LLMEvent`，见 [`provider/types.ts`](https://github.com/FishInSalt/ink/blob/main/src/provider/types.ts)。
 
 这里要区分**事件**和上篇的**消息**：事件传递接收过程中的变化，消息保存对话内容。`message_end` 把两者接起来——它携带一条完整的 `assistant` 消息。Agent 循环取得这条消息后，再将它写入 `history`，筛选工具请求并执行。
 
@@ -323,7 +323,9 @@ if (choice?.finish_reason !== undefined && choice.finish_reason !== null) {
 
 // 响应体读取结束后，且用户没有取消：
 if (!sawFinish) {
-  throw new Error("OpenAI stream ended without finish_reason — response may be truncated");
+  throw new Error(
+    "OpenAI stream ended without finish_reason — response may be truncated"
+  );
 }
 ```
 
@@ -398,7 +400,7 @@ function safeParseJson(raw) {
 
 因此，收到 `message_end` 表示接入层结束了本次组装，并交出消息；内容是否被截断，还要看 `stopReason`，工具参数是否可用还要继续校验。它也不代表 Agent 已完成用户的任务。
 
-当前 imp 的 Agent 循环没有专门处理 `stopReason: "max_tokens"` 的分支，不会自动续写。要处理这种情况，可以先向用户提示回复被截断；如果需要继续生成，还要设计后续请求，以及新旧内容怎样衔接。
+当前 Ink 的 Agent 循环没有专门处理 `stopReason: "max_tokens"` 的分支，不会自动续写。要处理这种情况，可以先向用户提示回复被截断；如果需要继续生成，还要设计后续请求，以及新旧内容怎样衔接。
 
 ## 5. 模型请求工具之后，轮到本地执行
 
@@ -406,4 +408,4 @@ function safeParseJson(raw) {
 
 下一章进入工具系统：拿到 `read` 和文件路径后，怎样找到对应实现、检查参数、执行操作，并把成功或失败转换成模型能理解的结果。
 
-流式工具字段可对照 [OpenAI 的函数调用文档](https://developers.openai.com/api/docs/guides/function-calling#streaming)；本文的组装、错误兜底和中断行为以 imp 源码为例。
+流式工具字段可对照 [OpenAI 的函数调用文档](https://developers.openai.com/api/docs/guides/function-calling#streaming)；本文的组装、错误兜底和中断行为以 Ink 源码为例。

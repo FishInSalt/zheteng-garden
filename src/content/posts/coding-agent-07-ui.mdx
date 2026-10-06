@@ -6,7 +6,7 @@ featured: false
 draft: false
 tags:
   - Coding Agent
-  - imp
+  - ink
   - Agent 原理
 description: 从模型文字、工具状态、子代理进展和等待动画出发，解释终端控制序列、显示状态、组件与差异重绘怎样配合，让 Coding Agent 在终端中持续更新界面。
 ---
@@ -18,7 +18,7 @@ import TerminalActivityDemo from "@/components/series/TerminalActivityDemo.astro
 
 使用主流 Coding Agent 时，把一个任务交给它，我们就能在界面上持续看到任务进展：回答逐渐出现，工具开始运行、返回结果，工作状态也随之变化。即使任务还没有完成，用户也能知道它正在做什么。
 
-以 imp 为例，把“修复求和函数，并运行测试”交给它后，终端里可能发生这些变化：
+以 Ink 为例，把“修复求和函数，并运行测试”交给它后，终端里可能发生这些变化：
 
 - **文字回复**：模型返回的回答逐段显示，代码块按相应格式呈现。
 - **思考文本**：模型服务提供思考内容时，用较暗、斜体的样式展示，与回答区分开。
@@ -36,7 +36,7 @@ import TerminalActivityDemo from "@/components/series/TerminalActivityDemo.astro
 除了普通文字，终端还能识别特定的控制字符和转义序列，用来移动光标、清除内容或改变样式。例如下面这个教学示例，在同一行把“正在运行测试”替换成“测试完成”：
 
 ```js
-// 教学示例，独立演示单行重绘，不是 imp 源码节选。
+// 教学示例，独立演示单行重绘，不是 Ink 源码节选。
 // 在支持这些控制序列的交互终端中运行。
 process.stdout.write("正在运行测试...");
 setTimeout(() => {
@@ -56,11 +56,11 @@ setTimeout(() => {
 
 这解释了单行状态变化的基础：**光标回到要修改的位置，清除旧内容，再写入新内容。** 多行界面还要处理光标上下移动、换行和滚动。如果回答、工具状态和输入框分别移动光标、输出文字，就容易互相覆盖，因此需要统一协调。
 
-imp 默认的交互界面属于 **TUI（Terminal User Interface，终端用户界面）**。早期规划中，imp 考虑过参考 pi-tui 的组件设计自研终端界面，也考虑过使用 React 式的终端 UI 库 Ink，最终直接引入了 pi 项目中的 [pi-tui](https://github.com/earendil-works/pi/tree/main/packages/tui)。
+Ink 默认的交互界面属于 **TUI（Terminal User Interface，终端用户界面）**。早期规划中，Ink 考虑过参考 pi-tui 的组件设计自研终端界面，也考虑过使用同名的 React 式终端 UI 库 Ink（与本文的 Agent 项目不同），最终直接引入了 pi 项目中的 [pi-tui](https://github.com/earendil-works/pi/tree/main/packages/tui)。
 
-这样可以复用 pi-tui 的编辑器、布局和重绘能力，由 imp 负责组织模型回复、工具状态等显示内容。各区域先更新自己要显示的内容，再通过 `requestRender()` 通知 TUI 安排刷新。
+这样可以复用 pi-tui 的编辑器、布局和重绘能力，由 Ink 负责组织模型回复、工具状态等显示内容。各区域先更新自己要显示的内容，再通过 `requestRender()` 通知 TUI 安排刷新。
 
-先看这些内容分别显示在哪里。下面按 imp 的主要区域画出终端布局，图中的文字用于说明各区域的作用：
+先看这些内容分别显示在哪里。下面按 Ink 的主要区域画出终端布局，图中的文字用于说明各区域的作用：
 
 <TerminalRenderingDiagram variant="regions" />
 
@@ -68,9 +68,9 @@ imp 默认的交互界面属于 **TUI（Terminal User Interface，终端用户�
 
 ### 2.1 回答和思考内容怎样逐步显示？
 
-模型返回一段新文字后，显示层先为它处理样式，再追加到对话区保存的内容中，最后通知界面刷新。在 imp 中，`Renderer` 负责处理样式，`TranscriptSink` 负责保存用于显示的对话内容。
+模型返回一段新文字后，显示层先为它处理样式，再追加到对话区保存的内容中，最后通知界面刷新。在 Ink 中，`Renderer` 负责处理样式，`TranscriptSink` 负责保存用于显示的对话内容。
 
-先看它们怎样连接。imp 的 [`cli.ts`](https://github.com/FishInSalt/imp/blob/main/src/cli.ts) 在创建 `Renderer` 时，为它指定输出文字的 `write` 函数。默认 TUI 模式下，这个函数将文字交给 `TranscriptSink.feed`；其他模式可以直接写向标准输出：
+先看它们怎样连接。Ink 的 [`cli.ts`](https://github.com/FishInSalt/ink/blob/main/src/cli.ts) 在创建 `Renderer` 时，为它指定输出文字的 `write` 函数。默认 TUI 模式下，这个函数将文字交给 `TranscriptSink.feed`；其他模式可以直接写向标准输出：
 
 ```ts
 // 文件：src/cli.ts
@@ -78,7 +78,7 @@ imp 默认的交互界面属于 **TUI（Terminal User Interface，终端用户�
 // 节选输出目标的选择；省略 shell、其他显示选项的准备。
 const transcript = shell === "tui" ? new TranscriptSink() : undefined;
 const renderer = new Renderer({
-  write: transcript ? transcript.feed : (text) => process.stdout.write(text),
+  write: transcript ? transcript.feed : text => process.stdout.write(text),
   // 省略其余选项；交互模式启用 Markdown 展示。
 });
 ```
@@ -99,7 +99,7 @@ switch (event.type) {
 }
 ```
 
-`raw` 接收 `event.text` 中的新文字，处理显示格式后，再通过前面配置的 `write` 交给 `TranscriptSink.feed`。默认 TUI 模式下，imp 会先积累文字，按段落或完整代码块处理 Markdown 样式，因此回答更接近逐段显示。
+`raw` 接收 `event.text` 中的新文字，处理显示格式后，再通过前面配置的 `write` 交给 `TranscriptSink.feed`。默认 TUI 模式下，Ink 会先积累文字，按段落或完整代码块处理 Markdown 样式，因此回答更接近逐段显示。
 
 接下来，`write` 将文字交给 `TranscriptSink.feed`。它先更新显示记录，再通知界面刷新：
 
@@ -156,7 +156,7 @@ this.options.transcript.onUpdate = this.boundOnUpdate;
 
 同一种工具可能被调用多次，因此需要按调用 ID 区分记录。例如，两个 `read` 同时运行时，仅凭工具名就无法判断该移除哪一行。
 
-imp 在 `activityTools` 中按工具调用 ID 保存正在运行的工具，收到结束事件后，再按同一个 ID 删除。下面保留普通工具的处理路径：
+Ink 在 `activityTools` 中按工具调用 ID 保存正在运行的工具，收到结束事件后，再按同一个 ID 删除。下面保留普通工具的处理路径：
 
 ```ts
 // 文件：src/repl/repl.ts
@@ -190,7 +190,11 @@ this.activityContainer.clear();
 for (const tool of this.activity.tools) {
   const label = tool.label === "" ? "" : ` ${tool.label}`;
   this.activityContainer.addChild(
-    new Text(dim(`${frame} ${tool.name}${label}${elapsed(tool.startedAtMs)}`, true), 0, 0),
+    new Text(
+      dim(`${frame} ${tool.name}${label}${elapsed(tool.startedAtMs)}`, true),
+      0,
+      0
+    )
   );
 }
 this.tui?.requestRender();
@@ -241,9 +245,9 @@ if (this.activityTimer === null) {
 
 ### 2.3 工具结果怎样折叠与展开？
 
-一个工具可能返回几百行日志。imp 把摘要和正文保存在 `Fold` 组件里，用 `expanded` 记录是否展开。
+一个工具可能返回几百行日志。Ink 把摘要和正文保存在 `Fold` 组件里，用 `expanded` 记录是否展开。
 
-按下 Ctrl+O 后，imp 会统一切换当前所有结果的展开状态：只要有结果收起，就全部展开；已经全部展开时，就全部收起。随后请求界面刷新：
+按下 Ctrl+O 后，Ink 会统一切换当前所有结果的展开状态：只要有结果收起，就全部展开；已经全部展开时，就全部收起。随后请求界面刷新：
 
 ```ts
 // 文件：src/repl/shell.ts
@@ -251,7 +255,7 @@ if (this.activityTimer === null) {
 // 节选 Ctrl+O 分支，省略其他按键处理。
 if (matchesKey(data, "ctrl+o")) {
   if (this.folds.length === 0) return undefined;
-  const expand = this.folds.some((f) => !f.isExpanded());
+  const expand = this.folds.some(f => !f.isExpanded());
   for (const fold of this.folds) fold.setExpanded(expand);
   this.tui?.requestRender();
   return { consume: true };
@@ -275,7 +279,7 @@ return rendered;
 
 这里的 `render(width)` 接收可用列宽，返回一个字符串数组，每项代表一行显示内容。收起时只有一行；展开后，数组会多出正文行。
 
-imp 把折叠组件放在对话记录中对应工具的下方。因此，展开或收起会改变这部分内容占用的行数，后续内容的位置由 TUI 重新安排，具体见第三节。这个操作只改变显示，不会重新执行工具，也不会修改发给模型的上下文。
+Ink 把折叠组件放在对话记录中对应工具的下方。因此，展开或收起会改变这部分内容占用的行数，后续内容的位置由 TUI 重新安排，具体见第三节。这个操作只改变显示，不会重新执行工具，也不会修改发给模型的上下文。
 
 ### 2.4 输入区、排队提示和状态栏怎样更新？
 
@@ -307,9 +311,9 @@ setFooter(text: string): void {
 
 ## 3. pi-tui 怎样把显示内容更新到终端
 
-假设工具还在运行，耗时从 2 秒增加到 3 秒，用户正在输入“请保持函数接口不变”。imp 已经更新了活动区的数据，也调用了 `requestRender()`。接下来，屏幕上的工具状态怎样改变，输入内容和光标又怎样保留下来？
+假设工具还在运行，耗时从 2 秒增加到 3 秒，用户正在输入“请保持函数接口不变”。Ink 已经更新了活动区的数据，也调用了 `requestRender()`。接下来，屏幕上的工具状态怎样改变，输入内容和光标又怎样保留下来？
 
-下面沿着这次刷新往下看。涉及库内部的代码按 imp 使用的 **pi-tui 0.82.0** 核对，与 imp 自己的显示逻辑分开标明。
+下面沿着这次刷新往下看。涉及库内部的代码按 Ink 使用的 **pi-tui 0.82.0** 核对，与 Ink 自己的显示逻辑分开标明。
 
 <TerminalRenderingDiagram variant="pipeline" />
 
@@ -322,7 +326,7 @@ setFooter(text: string): void {
 先用内置的 `Text` 和 `Input` 组件搭一个最小界面，看看使用方式：
 
 ```ts
-// 教学示例：演示组件装配和一次更新，不是 imp 源码节选。
+// 教学示例：演示组件装配和一次更新，不是 Ink 源码节选。
 // 省略启动、退出和真实事件来源。
 import { TUI, Text, Input, ProcessTerminal } from "@earendil-works/pi-tui";
 
@@ -342,7 +346,7 @@ status.setText("bash npm test · 3s");
 tui.requestRender();
 ```
 
-`Text` 的两个 `0` 表示不额外添加水平、垂直留白；`setFocus(input)` 将普通键盘输入交给输入组件。这里的单行 `Input` 用于演示，imp 实际使用的是支持多行编辑的 `Editor`。
+`Text` 的两个 `0` 表示不额外添加水平、垂直留白；`setFocus(input)` 将普通键盘输入交给输入组件。这里的单行 `Input` 用于演示，Ink 实际使用的是支持多行编辑的 `Editor`。
 
 `addChild` 按顺序加入组件。刷新时，容器调用各组件的 `render(width)`，依次拼接它们返回的显示行。回答占两行，状态占一行，输入区就排在它们之后；回答增加或工具结果展开时，后面的区域也随之移动。
 
@@ -376,7 +380,7 @@ const delay = Math.max(0, TUI.MIN_RENDER_INTERVAL_MS - elapsed);
 
 这个版本的最小刷新间隔为 16 毫秒。例如，上次刷新后第 3、7、10 毫秒分别收到更新，通常可以合并到约第 16 毫秒的一次刷新中。具体时间还受事件循环和渲染耗时影响。
 
-**没有刷新请求时，pi-tui 不会为了维持帧率一直重绘。** 第二节的等待动画之所以持续转动，是因为 imp 的定时器不断改变动画字符，再请求刷新。
+**没有刷新请求时，pi-tui 不会为了维持帧率一直重绘。** 第二节的等待动画之所以持续转动，是因为 Ink 的定时器不断改变动画字符，再请求刷新。
 
 ### 3.3 怎样找到并重绘发生变化的内容？
 
@@ -427,6 +431,6 @@ for (let i = 0; i < maxLines; i++) {
 
 模型回复逐段出现、工具耗时增长、子代理状态变化、日志展开，看起来是不同的效果，最终都可以沿同一条路径理解：信息到达或计时器触发，更新显示状态，组件生成新的行，TUI 再把变化写到终端。
 
-其中，imp 负责理解运行事件并组织显示内容，pi-tui 负责布局、刷新调度和终端重绘。开发 Coding Agent 时，需要弄清这两部分怎样连接，才能在增加新的显示效果时知道该修改哪里。
+其中，Ink 负责理解运行事件并组织显示内容，pi-tui 负责布局、刷新调度和终端重绘。开发 Coding Agent 时，需要弄清这两部分怎样连接，才能在增加新的显示效果时知道该修改哪里。
 
 界面还会承接权限确认等操作。下一篇讨论权限与信任边界：Agent 怎样判断哪些内容可以信任、哪些操作需要限制或由用户批准。

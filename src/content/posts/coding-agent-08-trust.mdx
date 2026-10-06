@@ -6,9 +6,9 @@ featured: false
 draft: false
 tags:
   - Coding Agent
-  - imp
+  - ink
   - Agent 原理
-description: 从项目资源加载和工具操作两类风险出发，解释 imp 怎样通过项目信任、执行前检查与用户审批应对风险，以及授权范围、执行隔离和失败处理还需要解决哪些问题。
+description: 从项目资源加载和工具操作两类风险出发，解释 Ink 怎样通过项目信任、执行前检查与用户审批应对风险，以及授权范围、执行隔离和失败处理还需要解决哪些问题。
 ---
 
 import PermissionBoundaryDiagram from "@/components/series/PermissionBoundaryDiagram.astro";
@@ -21,13 +21,13 @@ import PermissionBoundaryDiagram from "@/components/series/PermissionBoundaryDia
 
 **另一类来自执行任务时的工具操作。** 为了修复测试，Agent 可能尝试修改全局配置，或者下载并运行一个脚本。这些操作可能影响其他项目，甚至把本地数据发送到外部，超出用户对这次任务的预期。
 
-**本篇要弄明白的是：Agent 怎样控制资源加载和工具执行的风险，减少非预期操作，并限制操作可能造成的影响？** 下面先看 imp 怎样处理这两类风险、还存在哪些局限，再结合主流 Agent 的做法，讨论怎样补上这些限制。
+**本篇要弄明白的是：Agent 怎样控制资源加载和工具执行的风险，减少非预期操作，并限制操作可能造成的影响？** 下面先看 Ink 怎样处理这两类风险、还存在哪些局限，再结合主流 Agent 的做法，讨论怎样补上这些限制。
 
 ## 2. 加载项目资源时，怎样控制风险？
 
 为了适应不同项目，Coding Agent 通常允许项目提供自己的配置和工作规则。例如，Claude Code 支持在项目的 `.claude/settings.json` 中配置 Hooks，让指定命令在会话开始、工具执行前后等时刻运行。这样，团队就可以把一些自动化处理随项目一起维护。[Claude Code 配置与 Hooks 文档](https://code.claude.com/docs/en/hooks#configuration)
 
-imp 也支持加载项目资源。例如，`.imp/extensions` 中的扩展是 JavaScript 代码。**启动时加载扩展，就会执行其中的代码，不必等到模型调用工具。** 下面节选自 [`loadExtensions`](https://github.com/FishInSalt/imp/blob/main/src/extensions/loader.ts)：
+Ink 也支持加载项目资源。例如，`.ink/extensions` 中的扩展是 JavaScript 代码。**启动时加载扩展，就会执行其中的代码，不必等到模型调用工具。** 下面节选自 [`loadExtensions`](https://github.com/FishInSalt/ink/blob/main/src/extensions/loader.ts)：
 
 ```ts
 // 文件：src/extensions/loader.ts
@@ -49,35 +49,35 @@ await factory(
       origin: candidate.origin,
       name: candidate.name,
     },
-    report,
-  ),
+    report
+  )
 );
 ```
 
-`extensionApi(...)` 为扩展提供注册工具、订阅事件等接口，但扩展仍然是运行在 imp 进程中的 JavaScript 代码。例如，某个扩展在模块顶层或初始化函数里写了读取本机配置、发送到外部服务器的逻辑，**加载它就可能触发数据外传，此时模型还没有开始处理任务。**
+`extensionApi(...)` 为扩展提供注册工具、订阅事件等接口，但扩展仍然是运行在 Ink 进程中的 JavaScript 代码。例如，某个扩展在模块顶层或初始化函数里写了读取本机配置、发送到外部服务器的逻辑，**加载它就可能触发数据外传，此时模型还没有开始处理任务。**
 
 这与 `AGENTS.md` 这类文字规则不同：文字通过影响模型来影响后续操作，扩展代码则可以直接使用当前进程的权限访问文件或网络。
 
-因此，imp 把项目信任检查放在资源加载之前：**先由用户决定是否启用这些项目资源，再加载其中的扩展代码。**
+因此，Ink 把项目信任检查放在资源加载之前：**先由用户决定是否启用这些项目资源，再加载其中的扩展代码。**
 
 <PermissionBoundaryDiagram variant="trust" />
 
-下面来看 imp 怎样判断项目是否受信任，以及这道检查控制哪些资源的加载。
+下面来看 Ink 怎样判断项目是否受信任，以及这道检查控制哪些资源的加载。
 
 ### 2.1 信任检查决定加载什么
 
-imp 的 [`trustRequiringResources`](https://github.com/FishInSalt/imp/blob/main/src/core/trust.ts) 会检查项目中的以下资源：
+Ink 的 [`trustRequiringResources`](https://github.com/FishInSalt/ink/blob/main/src/core/trust.ts) 会检查项目中的以下资源：
 
 <div style="overflow-x: auto;" tabindex="0" role="region" aria-label="项目信任资源表，可横向滚动">
 <div style="min-width: 560px;">
 
-| 项目资源 | 为什么需要先决定是否加载 |
-| --- | --- |
-| `.imp/extensions` | 扩展可以执行代码、注册工具和处理函数 |
-| `.imp/agents`、`.imp/commands`、`.imp/skills` | 提供子代理配置或影响模型行为的内容 |
-| `.imp/settings.json` | 改变模型和运行设置 |
-| `.imp/SYSTEM.md`、`.imp/APPEND_SYSTEM.md` | 替换或补充系统指令 |
-| 项目范围内的 `.agents/skills` | 加载技能；查找范围包括到 Git 根目录之间的祖先目录 |
+| 项目资源                                      | 为什么需要先决定是否加载                          |
+| --------------------------------------------- | ------------------------------------------------- |
+| `.ink/extensions`                             | 扩展可以执行代码、注册工具和处理函数              |
+| `.ink/agents`、`.ink/commands`、`.ink/skills` | 提供子代理配置或影响模型行为的内容                |
+| `.ink/settings.json`                          | 改变模型和运行设置                                |
+| `.ink/SYSTEM.md`、`.ink/APPEND_SYSTEM.md`     | 替换或补充系统指令                                |
+| 项目范围内的 `.agents/skills`                 | 加载技能；查找范围包括到 Git 根目录之间的祖先目录 |
 
 </div>
 </div>
@@ -109,9 +109,10 @@ if (entry !== null) {
 }
 
 if (interactive) {
-  const answer = askTui !== undefined
-    ? await askTui(cwd, resources)
-    : await askTrustOnTty(cwd, resources);
+  const answer =
+    askTui !== undefined
+      ? await askTui(cwd, resources)
+      : await askTrustOnTty(cwd, resources);
   if (answer === null) return false; // 取消：本次不加载，不保存决定。
   if (answer === "session") return true; // 仅本次信任，不保存决定。
 
@@ -127,11 +128,11 @@ return false;
 
 拒绝时，加载器会跳过受这道检查控制的项目资源；不是退出 Agent，也不是禁止读取仓库代码。用户自己安装的全局资源，以及通过 `-e` 明确指定的扩展，不受项目扩展目录的这道检查控制。
 
-普通 `AGENTS.md` 在当前 imp 中也不受这道信任检查控制。它仍可能进入模型上下文，因此不能把“项目未受信任”理解成“项目中的文字不会影响模型”。
+普通 `AGENTS.md` 在当前 Ink 中也不受这道信任检查控制。它仍可能进入模型上下文，因此不能把“项目未受信任”理解成“项目中的文字不会影响模型”。
 
 ### 2.2 信任决定怎样保存和继承？
 
-长期决定保存在 `~/.imp/trust.json`。例如下面这份示意记录，信任 `/work/team`，但拒绝它下面的一个目录：
+长期决定保存在 `~/.ink/trust.json`。例如下面这份示意记录，信任 `/work/team`，但拒绝它下面的一个目录：
 
 ```json
 {
@@ -140,7 +141,7 @@ return false;
 }
 ```
 
-imp 从当前目录向上查找，遇到最近的一条记录就停止：
+Ink 从当前目录向上查找，遇到最近的一条记录就停止：
 
 ```ts
 // 文件：src/core/trust.ts
@@ -174,15 +175,15 @@ for (;;) {
 
 回到修复测试的场景。当前项目在 `/work/app`，Agent 却准备修改 `/work/shared/test-config.json`。这份配置可能被其他项目共用，修改它虽然能修好当前测试，也可能影响其他项目。
 
-控制这类风险的思路，是在工具执行之前检查操作及其目标，根据规则决定直接放行、请求用户批准，还是拒绝执行。imp 的 Agent 循环为此提供了执行前钩子 `onToolCall`。开发者可以在扩展中通过 `api.on("tool_call", handler)` 注册检查逻辑；工具执行前，`onToolCall` 会触发这些处理函数，等待检查结果后再决定是否执行工具。具体的扩展接入过程会在第 09 篇介绍。
+控制这类风险的思路，是在工具执行之前检查操作及其目标，根据规则决定直接放行、请求用户批准，还是拒绝执行。Ink 的 Agent 循环为此提供了执行前钩子 `onToolCall`。开发者可以在扩展中通过 `api.on("tool_call", handler)` 注册检查逻辑；工具执行前，`onToolCall` 会触发这些处理函数，等待检查结果后再决定是否执行工具。具体的扩展接入过程会在第 09 篇介绍。
 
-imp 参考了 pi 的扩展设计，**把具体的风险判断规则交给扩展实现，默认不启用这类规则。** 仓库附带的 [Guardian 扩展示例](https://github.com/FishInSalt/imp/blob/main/examples/extensions/guardian.mjs) 提供了一个简单实现：检查部分危险命令和文件写入，按规则拒绝操作或请求用户批准。**这个扩展需要安装并成功加载才会生效。**
+Ink 参考了 pi 的扩展设计，**把具体的风险判断规则交给扩展实现，默认不启用这类规则。** 仓库附带的 [Guardian 扩展示例](https://github.com/FishInSalt/ink/blob/main/examples/extensions/guardian.mjs) 提供了一个简单实现：检查部分危险命令和文件写入，按规则拒绝操作或请求用户批准。**这个扩展需要安装并成功加载才会生效。**
 
 <PermissionBoundaryDiagram variant="call" />
 
 ### 3.1 Agent 循环怎样等待检查，并决定是否执行？
 
-先看 [`loop.ts`](https://github.com/FishInSalt/imp/blob/main/src/core/loop.ts) 中的 `executeToolCall`。`prepareToolCall` 完成工具查找与参数校验，通过后把执行入口保存在 `prepared.run` 中。此时工具还没有执行，循环会先等待 `onToolCall` 的检查结果：
+先看 [`loop.ts`](https://github.com/FishInSalt/ink/blob/main/src/core/loop.ts) 中的 `executeToolCall`。`prepareToolCall` 完成工具查找与参数校验，通过后把执行入口保存在 `prepared.run` 中。此时工具还没有执行，循环会先等待 `onToolCall` 的检查结果：
 
 ```ts
 // 文件：src/core/loop.ts
@@ -223,7 +224,7 @@ return prepared.run(signal);
 // 所在函数：RunnerImpl.runTurnInner
 // 节选 runAgentLoop 的调用；省略模型、历史等其他参数，不能单独运行。
 const result = await runAgentLoop({
-  onToolCall: (call) =>
+  onToolCall: call =>
     this.options.extensions?.emitToolCall({
       type: "tool_call",
       ...call, // 本次工具调用的 ID、名称和参数。
@@ -256,8 +257,11 @@ Guardian 通过 `api.on("tool_call", handler)` 注册检查函数。调用时，
 // 文件：examples/extensions/guardian.mjs
 // 所在位置：default 导出函数注册的 tool_call 回调
 // 节选文件写入分支；省略 Bash 分支及辅助函数定义，不能单独运行。
-api.on("tool_call", async (event) => {
-  if ((event.name === "write" || event.name === "edit") && typeof event.args.path === "string") {
+api.on("tool_call", async event => {
+  if (
+    (event.name === "write" || event.name === "edit") &&
+    typeof event.args.path === "string"
+  ) {
     const cwd = callerCwd(event);
     const floor = floorOf(path.resolve(cwd, event.args.path));
     if (floor !== undefined) {
@@ -267,7 +271,7 @@ api.on("tool_call", async (event) => {
       const approved = await api.confirm(
         `[guardian] allow writing outside ${cwd}?`,
         event.args.path,
-        { sessionKey: `guardian:write:${cwd}` },
+        { sessionKey: `guardian:write:${cwd}` }
       );
       if (approved) return undefined;
       return {
@@ -291,13 +295,13 @@ api.on("tool_call", async (event) => {
 
 ### 3.3 用户的回答怎样变成执行决定？
 
-刚才的 `api.confirm` 将审批问题交给终端交互层。imp 的 TUI 提供三个选项：
+刚才的 `api.confirm` 将审批问题交给终端交互层。Ink 的 TUI 提供三个选项：
 
 - **允许本次**：本次检查通过，不保存批准记录。
 - **本次会话不再询问**：本次检查通过，并记住扩展提供的 `sessionKey`；后续相同键的询问可以复用批准。
 - **拒绝**：本次检查不通过。取消选择也按拒绝处理。
 
-如果没有可复用的批准，就需要等待用户选择。下面是 [`repl.ts`](https://github.com/FishInSalt/imp/blob/main/src/repl/repl.ts) 中 `TtyConfirm.handler` 的核心处理：
+如果没有可复用的批准，就需要等待用户选择。下面是 [`repl.ts`](https://github.com/FishInSalt/ink/blob/main/src/repl/repl.ts) 中 `TtyConfirm.handler` 的核心处理：
 
 ```ts
 // 文件：src/repl/repl.ts
@@ -323,7 +327,7 @@ if (select !== null) {
 
 “本次会话不再询问”究竟覆盖什么，由 `sessionKey` 决定。刚才的写入规则使用 `guardian:write:/work/app`。选择这个选项后，记住的是**从同一工作目录发起的项目外写入审批**，不限于这一个共享配置文件。预设保护目录仍会先被拒绝，因为那段检查发生在 `api.confirm` 之前。
 
-`sessionAllowed` 只保存在当前进程内，不会写入会话文件，重启 imp 后也不会恢复这些批准。
+`sessionAllowed` 只保存在当前进程内，不会写入会话文件，重启 Ink 后也不会恢复这些批准。
 
 用户拒绝后，Agent 循环把拒绝原因作为工具结果写入历史，让模型在下一次调用时知道这次工具操作没有执行。
 
@@ -334,7 +338,7 @@ if (select !== null) {
 - **检查依赖扩展成功加载。** Guardian 是可选扩展；没有启用或加载失败时，它的规则不会生效。
 - **审批范围比较粗。** 选择“本次会话不再询问”后，同一工作目录发起的其他项目外写入，也可能复用这份批准，而不再逐个询问。
 - **规则只能识别部分风险。** 路径判断使用 `path.resolve` 和目录前缀比较，命令判断主要依靠文本规则，不能保证覆盖符号链接或脚本内部的行为。
-- **通过检查后，没有进一步限制实际访问。** 工具使用当前用户权限运行，imp 尚未提供操作系统级沙箱。一个获准运行的脚本，仍可能访问任务之外的文件或网络。
+- **通过检查后，没有进一步限制实际访问。** 工具使用当前用户权限运行，Ink 尚未提供操作系统级沙箱。一个获准运行的脚本，仍可能访问任务之外的文件或网络。
 
 因此，执行前检查只是风险控制的一部分。要限制操作真正造成的影响，还需要约束它运行时能够访问的资源。
 
@@ -390,6 +394,6 @@ if (select !== null) {
 
 ## 5. 从加载前检查，到运行时限制
 
-imp 提供了项目信任检查，以及通过扩展接入工具审批的机制；要把这些能力发展成更完整的风险控制，还需要明确授权范围，并补上执行隔离等保护。
+Ink 提供了项目信任检查，以及通过扩展接入工具审批的机制；要把这些能力发展成更完整的风险控制，还需要明确授权范围，并补上执行隔离等保护。
 
 Guardian 也展示了扩展怎样参与 Agent 的工作流程。下一篇继续看扩展机制：外部模块怎样增加工具、命令和自定义处理逻辑。

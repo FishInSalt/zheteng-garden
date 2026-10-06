@@ -2,7 +2,7 @@
 export const codingAgentChapters = [
   {
     number: "00",
-    title: "为什么开发 imp",
+    title: "为什么开发 Ink",
     question: "背景、架构全貌与系列导读",
     postId: "coding-agent-00-under-the-hood",
   },
@@ -82,7 +82,7 @@ export const codingAgentChapters = [
 ] as const;
 
 /** Dates describe checked-in milestones; they do not estimate development effort. */
-export const impMilestones = [
+export const inkMilestones = [
   {
     date: "2026-08-25",
     period: "2026.08.25",

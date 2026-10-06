@@ -1,12 +1,12 @@
 ---
 import "./series-visual.css";
-import { impMilestones } from "@/data/coding-agent-series";
+import { inkMilestones } from "@/data/coding-agent-series";
 ---
 
 <figure class="development-timeline series-visual not-prose">
   <ol>
     {
-      impMilestones.map(item => (
+      inkMilestones.map(item => (
         <li>
           <time datetime={item.date}>{item.period}</time>
           <div class="milestone">
@@ -16,7 +16,7 @@ import { impMilestones } from "@/data/coding-agent-series";
             <div class="sources">
               {item.commits.map(commit => (
                 <a
-                  href={`https://github.com/FishInSalt/imp/commit/${commit.id}`}
+                  href={`https://github.com/FishInSalt/ink/commit/${commit.id}`}
                 >
                   {commit.label}
                   <span class="commit">{commit.id.slice(0, 7)}</span>
