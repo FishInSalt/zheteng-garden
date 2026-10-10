@@ -1,0 +1,484 @@
+---
+import "./series-visual.css";
+interface Props {
+  variant: "flow" | "history" | "parallel" | "workspace";
+}
+const { variant } = Astro.props;
+const titles = {
+  flow: "一次子任务的委派、执行与结果返回",
+  history: "同一次调查，两份独立的对话历史",
+  parallel: "最多同时运行 5 个，空位立即补位",
+  workspace: "共享工作目录与独立工作副本的区别",
+};
+const flow = [
+  [
+    "主 Agent",
+    "模型生成 task 工具调用，交代子任务要求",
+    'name: "task", arguments: { prompt: "调查登录流程，只读，返回结论" }',
+  ],
+  [
+    "task 工具",
+    "准备系统指令和工具，启动子代理",
+    "runSubagent({ prompt, system, tools, … })",
+  ],
+  [
+    "子代理",
+    "从委派任务开始，反复调用模型和工具",
+    "const childHistory = []; runAgentLoop({ history: childHistory, userMessage: prompt, … })",
+  ],
+  [
+    "主 Agent",
+    "接收 task 的工具结果，继续处理原任务",
+    "task 的工具结果 → 主消息历史 → 下一次模型调用",
+  ],
+];
+const parentMessages = [
+  ["用户任务", "给登录流程增加失败次数限制。"],
+  [
+    "模型生成 task 调用 · task-1",
+    "调查登录入口与认证逻辑，只读，返回相关位置和建议。",
+  ],
+  [
+    "工具结果 · 对应 task-1",
+    "登录入口是 src/auth/login.ts；需要关注失败计数与清零条件。",
+  ],
+  ["下一次模型回复", "根据报告继续核实代码，准备修改与测试。"],
+];
+const childMessages = [
+  ["子任务消息", "调查登录入口与认证逻辑，只读，返回相关位置和建议。"],
+  ["模型生成工具调用", "grep 搜索认证入口，read 读取相关文件。"],
+  ["工具结果", "调查所需的文件内容与搜索结果。"],
+  ["继续调查", "按需要再读文件，新的调用与结果留在子历史。"],
+  ["最后的报告", "登录入口是 src/auth/login.ts；需要关注失败计数与清零条件。"],
+];
+const moments = [
+  {
+    time: "T0",
+    action: "按顺序检查 A—G，准备执行",
+    a: "尚未开始执行",
+    b: "A、B、C、D、E、F、G",
+    main: "登记全部调用；本例均通过检查",
+    code: "7 个 task 调用 → 检查 → 等待执行",
+  },
+  {
+    time: "T1",
+    action: "前 5 个取得执行机会",
+    a: "A、B、C、D、E · 共 5 个",
+    b: "F、G",
+    main: "主 Agent 等待工具调用的结果",
+    code: "5 个运行 + 2 个等待",
+  },
+  {
+    time: "T2",
+    action: "B 先结束，F 立即补位",
+    a: "A、C、D、E、F · 仍为 5 个",
+    b: "G",
+    main: "界面显示 B 已完成；主 Agent 继续等待",
+    code: "B 返回报告 → 启动 F",
+  },
+  {
+    time: "T3",
+    action: "C 结束，G 立即补位",
+    a: "A、D、E、F、G · 仍为 5 个",
+    b: "没有等待项",
+    main: "B、C 已完成；后续调用已全部启动",
+    code: "C 返回报告 → 启动 G",
+  },
+  {
+    time: "T4",
+    action: "其余调用陆续结束，A 仍在运行",
+    a: "A · 共 1 个",
+    b: "没有等待项",
+    main: "B—G 已完成；主 Agent 仍等待 A",
+    code: "继续收集报告；暂不再次调用模型",
+  },
+  {
+    time: "T5",
+    action: "A 结束，全部结果交回",
+    a: "所有调用均已结束",
+    b: "没有等待项",
+    main: "按 A—G 顺序收集结果，写入历史后继续调用模型",
+    code: "全部结果 → 主 Agent 的 history → 下一次模型调用",
+  },
+];
+const titleId = `subagent-${variant}-title`;
+---
+
+<figure
+  class:list={["subagent-diagram", "series-visual", "not-prose", variant]}
+  aria-labelledby={titleId}
+>
+  <figcaption id={titleId}>{titles[variant]}</figcaption>
+  {
+    variant === "flow" && (
+      <>
+        <ol class="flow-list">
+          {flow.map(([owner, action, data], index) => (
+            <li>
+              <span class="step" aria-hidden="true">
+                {index + 1}
+              </span>
+              <div class="card">
+                <span class="owner">{owner}</span>
+                <strong>{action}</strong>
+                <code>{data}</code>
+              </div>
+            </li>
+          ))}
+        </ol>
+        <p class="note">
+          新建子代理的消息历史从空数组开始，先加入委派任务，再记录它自己的模型回复和工具结果。子代理结束后，task
+          工具把报告作为工具结果返回；主 Agent
+          将结果写入消息历史，再继续调用模型。
+        </p>
+      </>
+    )
+  }
+  {
+    variant === "history" && (
+      <>
+        <p class="handoff">
+          <span aria-hidden="true">→</span>{" "}
+          委派时：任务说明成为子历史中的用户消息
+        </p>
+        <div class="columns">
+          <section class="lane parent-lane" aria-label="主 Agent 的消息历史">
+            <strong class="lane-title">主 Agent 的 history</strong>
+            <ol class="messages">
+              {parentMessages.map(([role, text]) => (
+                <li>
+                  <span class="owner">{role}</span>
+                  <p>{text}</p>
+                </li>
+              ))}
+            </ol>
+          </section>
+          <section class="lane child-lane" aria-label="子代理的消息历史">
+            <strong class="lane-title">子代理自己的 history</strong>
+            <ol class="messages">
+              {childMessages.map(([role, text]) => (
+                <li>
+                  <span class="owner">{role}</span>
+                  <p>{text}</p>
+                </li>
+              ))}
+            </ol>
+          </section>
+        </div>
+        <p class="handoff">
+          <span aria-hidden="true">←</span> 返回时：报告成为主历史中 task-1
+          对应的工具结果
+        </p>
+        <p class="note">
+          文件位置与结论为教学示意。图中只展示消息要点；系统指令和工具集合另行提供，子历史的中间过程不会自动复制到主历史。
+        </p>
+      </>
+    )
+  }
+  {
+    variant === "parallel" && (
+      <>
+        <ol class="timeline">
+          {moments.map(moment => (
+            <li>
+              <div class="moment">
+                <span class="step">{moment.time}</span>
+                <strong>{moment.action}</strong>
+              </div>
+              <div class="actors">
+                <div class="actor child-a">
+                  <span class="owner">正在执行</span>
+                  <p>{moment.a}</p>
+                </div>
+                <div class="actor child-b">
+                  <span class="owner">等待执行</span>
+                  <p>{moment.b}</p>
+                </div>
+                <div class="actor">
+                  <span class="owner">完成状态与主 Agent</span>
+                  <p>{moment.main}</p>
+                </div>
+              </div>
+              <code class="data-line">{moment.code}</code>
+            </li>
+          ))}
+        </ol>
+        <p class="note">
+          A—G 表示同一条回复中连续的 7 个独立 task 调用，本例均通过检查。 T0—T5
+          是处理顺序示意，不代表实际耗时。B、C 结束后，F、G
+          就能启动，不必等较慢的 A；主 Agent 仍等全部结果再调用模型。
+        </p>
+      </>
+    )
+  }
+  {
+    variant === "workspace" && (
+      <>
+        <div class="columns">
+          <section
+            class="lane parent-lane"
+            aria-label="多个子代理共享主 Agent 的工作目录"
+          >
+            <strong class="lane-title">默认：共享目录</strong>
+            <p>不同历史，访问同一份项目文件</p>
+            <ul class="paths">
+              <li>
+                <>
+                  <span>主 Agent</span>
+                  <code>/project/src/auth/login.ts</code>
+                </>
+              </li>
+              <li>
+                <>
+                  <span>子代理 A</span>
+                  <code>/project/src/auth/login.ts</code>
+                </>
+              </li>
+              <li>
+                <>
+                  <span>子代理 B</span>
+                  <code>/project/src/auth/login.ts</code>
+                </>
+              </li>
+            </ul>
+            <p class="boundary">A 修改后，B 再读取也会看到这份修改。</p>
+          </section>
+          <section
+            class="lane child-lane"
+            aria-label="子代理使用自己的 Git worktree"
+          >
+            <strong class="lane-title">worktree：分开工作副本</strong>
+            <p>
+              从主 Agent 当前的 <code>HEAD</code> 提交开始，在各自目录中修改
+            </p>
+            <ul class="paths">
+              <li>
+                <>
+                  <span>主 Agent · 原目录</span>
+                  <code>/project/src/auth/login.ts</code>
+                </>
+              </li>
+              <li>
+                <>
+                  <span>子代理 A · 分支 ink/task-a</span>
+                  <code>/tmp/ink-worktree-a/src/auth/login.ts</code>
+                </>
+              </li>
+              <li>
+                <>
+                  <span>子代理 B · 分支 ink/task-b</span>
+                  <code>/tmp/ink-worktree-b/src/auth/login.ts</code>
+                </>
+              </li>
+            </ul>
+            <p class="boundary">
+              子代理提交修改 → 主 Agent 检查、验证并决定合并。
+            </p>
+          </section>
+        </div>
+        <p class="note">
+          路径与分支名为示意。新 worktree
+          不含原工作目录中未提交的修改；独立目录也不隔离绝对路径访问、共享依赖或外部服务。
+        </p>
+      </>
+    )
+  }
+</figure>
+
+<style>
+  .subagent-diagram {
+    margin: 2rem 0;
+    padding: 1.1rem;
+    border: 1px solid var(--series-rule);
+    border-radius: 0.8rem;
+    background: var(--series-paper);
+    color: var(--series-ink);
+    font-size: 0.88rem;
+    line-height: 1.65;
+    container-type: inline-size;
+    overflow-wrap: anywhere;
+  }
+  figcaption {
+    font-weight: 700;
+    margin-bottom: 1rem;
+  }
+  p {
+    margin: 0.45rem 0 0;
+  }
+  ol,
+  ul {
+    padding: 0;
+    margin: 0;
+    list-style: none;
+  }
+  li {
+    margin: 0;
+    padding: 0;
+  }
+  code {
+    font-size: 0.8rem;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  .owner {
+    display: block;
+    color: var(--series-secondary);
+    font-size: 0.78rem;
+  }
+  .note {
+    margin-top: 1rem;
+    color: var(--series-secondary);
+    font-size: 0.8rem;
+  }
+  .step {
+    display: grid;
+    place-items: center;
+    width: 2.2rem;
+    height: 2.2rem;
+    border: 1px solid var(--series-blue);
+    border-radius: 50%;
+    color: var(--series-blue);
+    font-variant-numeric: tabular-nums;
+    flex: 0 0 auto;
+  }
+  .flow-list {
+    display: grid;
+    gap: 0.75rem;
+  }
+  .flow-list li {
+    display: grid;
+    grid-template-columns: 2.2rem minmax(0, 1fr);
+    gap: 0.75rem;
+    align-items: start;
+  }
+  .card {
+    border: 1px solid var(--series-rule);
+    border-radius: 0.5rem;
+    padding: 0.8rem;
+    min-width: 0;
+  }
+  .card strong {
+    display: block;
+    margin: 0.2rem 0 0.65rem;
+  }
+  .card code,
+  .data-line {
+    display: block;
+    padding: 0.55rem 0.7rem;
+    background: var(--series-blue-wash);
+    border-radius: 0.3rem;
+  }
+  .columns {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1rem;
+  }
+  .lane {
+    min-width: 0;
+    border: 1px solid var(--series-rule);
+    border-radius: 0.5rem;
+    padding: 0.8rem;
+  }
+  .parent-lane {
+    border-top: 3px solid var(--series-blue);
+  }
+  .child-lane {
+    border-top: 3px solid var(--series-feedback);
+  }
+  .lane-title {
+    display: block;
+    margin-bottom: 0.7rem;
+  }
+  .messages {
+    display: grid;
+    gap: 0.7rem;
+  }
+  .messages li {
+    border: 1px solid var(--series-rule);
+    border-radius: 0.3rem;
+    padding: 0.6rem;
+  }
+  .messages p {
+    margin-top: 0.25rem;
+  }
+  .handoff {
+    padding: 0.6rem 0.7rem;
+    margin: 0.8rem 0;
+    background: var(--series-blue-wash);
+    border-radius: 0.3rem;
+  }
+  .handoff span {
+    font-weight: 700;
+    color: var(--series-blue);
+    margin-right: 0.25rem;
+  }
+  .timeline {
+    display: grid;
+    gap: 1rem;
+  }
+  .timeline > li {
+    padding-bottom: 1rem;
+    border-bottom: 1px solid var(--series-rule);
+  }
+  .timeline > li:last-child {
+    padding-bottom: 0;
+    border-bottom: 0;
+  }
+  .moment {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    margin-bottom: 0.7rem;
+  }
+  .actors {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.5rem;
+    margin-bottom: 0.5rem;
+  }
+  .actor {
+    min-width: 0;
+    padding: 0.6rem;
+    border: 1px solid var(--series-rule);
+    border-radius: 0.3rem;
+  }
+  .actor p {
+    margin-top: 0.2rem;
+  }
+  .child-a {
+    border-top: 2px solid var(--series-blue);
+  }
+  .child-b {
+    border-top: 2px solid var(--series-feedback);
+  }
+  .paths {
+    display: grid;
+    gap: 0.7rem;
+    margin-top: 0.8rem;
+  }
+  .paths li {
+    border-bottom: 1px solid var(--series-rule);
+    padding-bottom: 0.6rem;
+  }
+  .paths span,
+  .paths code {
+    display: block;
+  }
+  .paths span {
+    color: var(--series-secondary);
+    font-size: 0.78rem;
+    margin-bottom: 0.25rem;
+  }
+  .boundary {
+    margin-top: 0.8rem;
+    font-weight: 600;
+  }
+  @container (max-width: 520px) {
+    .columns {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    .actors {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+</style>

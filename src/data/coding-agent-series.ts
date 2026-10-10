@@ -68,10 +68,16 @@ export const codingAgentChapters = [
     postId: "coding-agent-09-extensions",
   },
   {
-    number: "10",
-    title: "子代理与并发协作",
-    question: "怎样委派任务、控制预算并处理文件竞争？",
+    number: "10 上",
+    title: "子代理——怎样委派任务并回收结果",
+    question: "怎样委派独立任务、准备子代理的上下文，并把结果带回主对话？",
     postId: "coding-agent-10-subagents",
+  },
+  {
+    number: "10 下",
+    title: "并发协作——怎样协调多个子代理",
+    question: "怎样并发执行子任务、对应地交回结果，并处理共享文件的冲突？",
+    postId: "coding-agent-10-concurrency",
   },
   {
     number: "11",

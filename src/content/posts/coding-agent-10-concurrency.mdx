@@ -1,0 +1,266 @@
+---
+author: 折腾客
+pubDatetime: 2026-10-10T15:35:33Z
+title: "Coding Agent 原理与实践 10（下）：并发协作——怎样协调多个子代理"
+featured: false
+draft: false
+tags:
+  - Coding Agent
+  - ink
+  - Agent 原理
+description: 从两个子代理同时调查代码出发，解释并发任务怎样启动、等待并交回结果，以及共享目录、文件锁和 Git worktree 分别解决什么问题。
+---
+
+import SubagentDiagram from "@/components/series/SubagentDiagram.astro";
+
+## 1. 两个子代理能同时工作吗？
+
+[上篇](/posts/coding-agent-10-subagents/)用“给登录流程增加失败次数限制”介绍了一次委派。修改之前，需要调查认证逻辑，也需要查看现有测试。两项调查不依赖彼此的结论，可以分别交给两个子代理。
+
+如果逐项调查，就要先等认证调查结束，再开始测试调查。并发执行时，两项调查可以在等待模型回复或文件操作时交错推进，减少逐项等待的时间。不过，能同时启动，并不代表所有子任务都适合同时执行。
+
+例如，两个子代理都读取测试文件，一般可以各自调查；如果都准备重写同一个测试文件，后写入的版本就可能覆盖前一个。即使每次写入都成功，合在一起也可能丢失修改。
+
+本篇要讲清楚的是：**多个子代理怎样同时工作，把结果交回主 Agent，并处理共享文件带来的冲突？** 先看并发调度，再看共享目录与独立工作副本。
+
+## 2. 多个子代理怎样并发执行？
+
+沿用登录流程的例子，模型可以在同一条回复中生成两个 `task` 调用：一个调查认证逻辑，另一个查看现有测试。Agent 循环把这些调用交给 `executeToolBatch`，由它安排执行；每个 `task` 按上篇的流程启动自己的子代理。
+
+`task` 通过 `concurrencySafe: true` 声明允许并发。调度器将连续允许并发的调用交给 `executeChunk`，先按顺序完成参数与执行前检查，再启动通过检查的调用。检查方式已在第 03 篇介绍，这里重点看检查之后怎样执行。
+
+整个过程是：**收到多个 task 调用 → 最多同时执行 5 个，空位即时补位 → 收集结果 → 主 Agent 再次调用模型。**
+
+### 2.1 多个子代理怎样并发运行？
+
+假设模型一次委派了 7 个独立子任务 A—G。Ink 先启动前 5 个，后 2 个等待。前面任意一个结束，就启动第 6 个；再空出一个位置，就启动第 7 个。即使 A 一直没有结束，F、G 也能陆续开始工作。
+
+<SubagentDiagram variant="parallel" />
+
+这就是当前的**滑动窗口调度**：最多同时运行 5 个，有空位就按委派顺序启动下一个。源码中的上限是 `MAX_CONCURRENT_SAFE_CALLS = 5`。
+
+[`executeChunk`](https://github.com/FishInSalt/ink/blob/main/src/core/loop.ts) 用最多 5 个异步函数 `worker` 实现这个过程。每个 `worker` 取走一个待执行调用，等待它结束，再取下一个。这里没有为每个 `worker` 创建线程；当一个子代理等待模型回复或工具结果时，其他子代理的异步调用仍能继续推进。
+
+检查通过的执行函数保存在 `plans` 中。代码先把它们放入 `runnable`，用 `head` 指向下一个待执行项；每项还保留原位置 `index`，完成后把结果存到 `settled[index]`：
+
+```ts
+// 文件：src/core/loop.ts
+// 所在函数：executeChunk，按正常执行路径简化。
+// 保留领取、执行与补位，省略类型、事件、计时和中断等待包装。
+const runnable = plans
+  .map((plan, index) => ({ plan, index }))
+  .filter(entry => "run" in entry.plan);
+let head = 0;
+
+const worker = async () => {
+  while (head < runnable.length) {
+    if (signal?.aborted) return;
+    const { plan, index } = runnable[head++]; // 取走下一个调用
+    const result = await plan.run(signal); // 执行 task，等待子代理结束
+    settled[index] = result; // 结果放回原调用位置
+    flush(); // 按调用顺序收集结果，下一小节解释
+    // 回到 while，立即取走下一个等待项
+  }
+};
+const workers = Array.from(
+  { length: Math.min(MAX_CONCURRENT_SAFE_CALLS, runnable.length) },
+  () => worker()
+);
+await Promise.all(workers);
+```
+
+`plan.run` 经由 `runTool` 调用 `task.execute`，再启动 `runSubagent`。共用的 `head` 在等待之前就已经加一，因此其他 `worker` 会取走后面的调用。一个 `worker` 结束当前调用后，就有了执行下一个的空位。
+
+`Promise.all` 等待这些 `worker` 全部结束。它们可以各自执行多项任务，所以这里限制的是**同时执行的数量**，并没有把 7 个任务固定切成 5 个和 2 个两批。
+
+这个上限约束当前这组工具调用，不是整个 Ink 进程的统一用量额度。任务是否独立，仍需要主 Agent 在委派时判断；串行工具也不会被后面的子任务越过。
+
+### 2.2 子代理的结果怎样交回主 Agent？
+
+图中的 B 先完成时，调度器通过 `tool_settled` 立即通知界面，显示 B 已结束，并继续启动 F。**更新完成状态和启动下一个任务，都不必等其他子代理结束。**
+
+结果收集则保持原调用顺序：`settled[index]` 保存每次调用的结果，`flush()` 从前往后检查，连续就绪的结果会依次加入 `results`；遇到尚未返回的位置就暂停，等新的结果到达后再继续。这不会阻止界面显示后面的任务已完成，也不会阻止空位补位。
+
+每份结果都保留对应的 `toolCallId`，让主 Agent 知道报告属于哪次委派。不过，加入 `results` 只是收集到调度器中，主 Agent 还没有把报告发送给模型。
+
+Agent 循环会等待本次回复中的工具调用全部处理完，再把结果写入 `history`：
+
+```ts
+// 文件：src/core/loop.ts
+// 所在函数：runAgentLoop，节选正常执行路径。
+// 省略截断回复与中断收尾处理。
+await executeToolBatch(
+  toolCalls,
+  toolMap,
+  signal,
+  onToolCall,
+  onEvent,
+  results,
+  clock
+);
+const toolResults: AgentMessage = { role: "toolResult", results };
+history.push(toolResults);
+onMessage?.(toolResults);
+// ……进入下一轮循环，带上全部结果再次调用模型。
+```
+
+沿用登录流程的任务，主 Agent 下一次调用模型时，就能一起提供认证逻辑和现有测试的调查报告。模型再结合原始需求，核实结论、制定修改方案或继续调用工具。**调度器负责并发执行和收集结果，报告的整合与后续决策由主 Agent 的模型完成。**
+
+## 3. 多个子代理同时修改代码，怎样处理文件冲突？
+
+前面两个子代理分别调查认证逻辑和现有测试。如果接下来它们都要修改 `src/auth/login.ts`，默认会操作同一个文件。假设它们先读到同一版代码，再各自写回修改，后一次写入就可能覆盖前一次的改动。
+
+多个子代理使用同一工作目录时，Ink 通过文件锁，让 `edit` 和 `write` 对同一文件的修改排队执行。不过，排队只能避免同时写入，依据旧版本生成的修改仍可能覆盖已有改动。
+
+也可以通过 Git worktree，为每个子代理准备独立的项目工作目录。子代理各自在自己的目录里修改代码，完成后再由主 Agent 检查和整合，避免在运行期间直接覆盖彼此的文件。
+
+### 3.1 文件锁怎么协调多个子代理修改同一文件？
+
+Ink 的 `edit` 和 `write` 使用 [`withFileLock`](https://github.com/FishInSalt/ink/blob/main/src/core/tools/file-lock.ts)，让同一文件的修改排队执行。这里的“文件锁”是 **Ink 进程内的队列**：先登记本次操作，等待前面的操作结束，再开始修改文件。
+
+```ts
+// 文件：src/core/tools/file-lock.ts
+// 所在函数：withFileLock；fn 是本次实际修改文件的操作。
+// queues 按文件路径记录队列；key 已尽可能解析为真实路径。
+const current = queues.get(key) ?? Promise.resolve(); // 等待前面的操作
+let release!: () => void;
+const next = new Promise<void>(resolve => {
+  release = resolve; // 本次结束时，用它通知后面的操作
+});
+const chained = current.then(() => next);
+queues.set(key, chained); // 后续操作会排到本次之后
+
+await current;
+try {
+  return await fn(); // 执行本次文件修改
+} finally {
+  release(); // 无论成功还是失败，都让后面的操作继续
+  // ……省略队列记录的清理。
+}
+```
+
+这能避免两个经过 `withFileLock` 的操作同时写入，却没有解决“依据旧内容修改”的问题。假设两个子代理先读到同一个旧版本，再分别生成完整新文件，即使写入串行执行，第二次 `write` 仍然会覆盖第一次的内容。
+
+`edit` 需要匹配 `oldText`，文件已经变化时可能失败，让子代理发现需要重新读取。但匹配失败不能检测所有冲突。通过 `bash` 运行的文件修改也不经过这把锁，其他进程不共享它。
+
+因此，共享目录适合独立调查，或已经明确划分修改范围的任务。同一文件上的相关修改，需要安排顺序，或者分别生成方案后由主 Agent 整合。
+
+### 3.2 怎样用 worktree 支持多个子代理并发修改代码？
+
+**Git worktree** 允许同一个 Git 仓库拥有多个工作目录。这些目录共享仓库的提交历史，但各自保存检出的项目文件，可以分别在不同分支上修改代码。
+
+例如，为两个子代理各准备一个工作目录和分支。即使它们都要修改 `src/auth/login.ts`，操作的也是各自目录中的文件，运行期间不会直接覆盖对方的修改。完成后，再通过 Git 比较和合并两个分支上的改动。
+
+Ink 利用这个功能，让并发运行的子代理在各自的工作目录中修改代码。主 Agent 为需要独立工作目录的子任务调用 `task` 时，设置 `worktree: true`。例如，其中一个子任务负责补充测试：
+
+```json
+{
+  "prompt": "为登录失败次数限制补充测试，完成后报告改动和验证结果。",
+  "worktree": true
+}
+```
+
+`task` 收到这个选项后，会完成三件事：
+
+1. 查找当前 Git 仓库，取得主 Agent 工作目录对应的当前提交。
+2. 调用 `createChildWorktree`，从这个提交创建新目录和分支。
+3. 将子代理的工具指向新目录，让它在那里读取、修改代码和运行命令。
+
+先看创建目录的源码：
+
+```ts
+// 文件：src/core/worktree.ts
+// 所在函数：createChildWorktree。
+// repo 保存仓库信息，其中 head 是新工作副本的起始提交。
+const dir = path.join(worktreeBaseDir(overrideBaseDir), `ink-worktree-${name}`);
+const branch = `ink/task-${name}`;
+const add = await git(repo.root, [
+  "worktree",
+  "add",
+  dir,
+  "-b",
+  branch,
+  repo.head,
+]);
+// ……检查创建结果，保存目录、分支及清理所需的记录。
+```
+
+新目录从 `repo.head` 这个提交开始，**原工作目录中尚未提交的修改不会自动复制过去**。如果子任务依赖这些修改，需要先提供它们，或者让子代理从已提交的状态开展工作。
+
+创建目录后，`task` 将新目录交给 `getToolsForChild`，由它重新创建内置工具。下面节选使用 worktree 时返回工具集合的部分：
+
+```ts
+// 文件：src/runner.ts
+// 所在函数：RunnerImpl 构造函数中传给 createTaskTool 的 getToolsForChild 回调。
+// 此处 cwd 已是子代理在新 worktree 中的工作目录。
+return [
+  createBashTool({ cwd }),
+  readFor(cwd), // 同样使用 cwd 创建 read，省略模型相关配置
+  createEditTool({ cwd }),
+  createWriteTool({ cwd }),
+  createGrepTool({ cwd }),
+  createFindTool({ cwd }),
+  createLsTool({ cwd }),
+];
+```
+
+例如，两个子代理的工具分别使用 `/tmp/ink-worktree-a` 和 `/tmp/ink-worktree-b` 作为工作目录。同样读取或修改 `src/auth/login.ts`，操作的就分别是这两个目录下的文件。**创建独立目录后，还要让子代理的工具在对应目录中工作，修改才会落到各自的文件上。**
+
+如果主 Agent 原本在仓库子目录中，子代理也会保留相同的相对位置。任务说明还会提醒子代理，将原目录的路径转换到自己的工作目录。
+
+<SubagentDiagram variant="workspace" />
+
+子代理在自己的工作副本里完成修改后，还需要把改动保存到自己的分支，再由主 Agent 检查和整合到原工作目录。这个过程涉及三项工作：
+
+- **子代理保存修改**：Ink 在子任务说明中要求它完成后提交到自己的分支。这个要求写在指令里，是否真的提交仍需检查。
+- **`task` 工具提供改动位置**：工作副本被保留时，工具自动在结果中附加目录、分支信息；确认存在改动时，还会附加变更概况，供主 Agent 查找和检查。
+- **主 Agent 检查和整合**：核实子代理的报告，查看实际改动、验证行为，再决定是否合并。Ink 不会在子任务结束后自动合并分支。
+
+两个子代理在独立目录中修改同一行，运行期间不会直接覆盖彼此，但合并时仍可能冲突。worktree 将冲突留到整合阶段，并没有替主 Agent 决定该保留哪份修改。
+
+如果工作副本中还有未提交的修改，仅合并分支不能带回这些文件变化，需要先检查并处理。
+
+总结一句话：Ink 通过 worktree 为子代理创建独立工作目录，并让各自的工具在对应目录中操作文件，从而支持并发修改，最后由主 Agent 检查和整合改动。
+
+## 4. 多个子代理运行结束或中断后，怎样收尾？
+
+多个子代理并发工作时，可能有的成功、有的失败，也可能被用户中断。此时既要决定其他子任务是否继续，也要保留已经产生的代码改动。
+
+### 4.1 一个子代理失败或用户中断，其他子代理会怎样？
+
+**一个子代理失败时，其他独立子任务继续执行。** 假设调查认证逻辑的子代理遇到模型服务错误，查看测试的子代理仍在运行。Ink 会收集前者的失败结果，让后者继续工作；等这批调用都结束后，再把各项结果交回主 Agent。异常怎样转成工具结果，已在[上篇 4.3 节](/posts/coding-agent-10-subagents/#43-运行出错已有信息怎样交回)介绍。
+
+**用户中断整次运行时，则通知正在执行的子代理停止。** 共用的取消信号会传到各个子代理的模型接入层和工具，调度器也不再启动队列中尚未执行的调用。取消信号怎样传递，见[上篇 4.2 节](/posts/coding-agent-10-subagents/#42-用户中断或子任务超时怎样停止运行)。
+
+中断不会撤销已经完成的文件修改。因此，停止运行后，还需要检查和保留子代理已经产生的改动。
+
+### 4.2 子代理结束后，怎样避免清理掉尚未整合的改动？
+
+子代理虽然运行失败或被中断，却可能已经修改了文件；即使工作目录没有未提交的修改，也可能已经产生了尚未整合的提交。因此，不能仅凭运行结束或目录干净，就删除 worktree。
+
+对于本次新建的 worktree，无论子代理成功、失败还是被中断，`task` 都会在收尾时调用 `attemptWorktreeCleanup`。它先检查是否有需要保留的工作，只有确认没有，才尝试删除目录和分支：
+
+```ts
+// 文件：src/core/tools/task.ts
+// 所在函数：attemptWorktreeCleanup。
+const assessment = await assessWorktreeRemoval(wt, repo);
+if (assessment.verdict !== "clean") {
+  return { state: "kept", assessment }; // 有工作或无法确认，保留
+}
+const errors = await removeChildWorktree(wt, repo);
+return errors.length === 0 ? { state: "removed" } : { state: "failed", errors };
+```
+
+`assessWorktreeRemoval` 会核对工作目录和分支，并检查文件修改与提交；这里的 `clean` 表示通过了清理检查，不能只看 `git status` 是否干净。
+
+| 检查结果                           | 当前处理                   |
+| ---------------------------------- | -------------------------- |
+| 确认没有需要保留的工作             | 尝试删除工作目录和子分支。 |
+| 发现未提交的修改、子代理提交等工作 | 保留目录和分支。           |
+| 无法可靠判断                       | 保留目录和分支。           |
+
+worktree 被保留时，`task` 会在返回结果中附上目录、分支以及改动概况或保留原因，供主 Agent 后续检查和整合。
+
+## 5. 子任务结束后，主 Agent 还要做什么？
+
+并发让独立子任务减少逐项等待，worktree 让代码修改先在各自的工作副本中完成。结果交回后，主 Agent 还需要核实结论、整合改动，并验证最初的需求：登录失败次数是否正确累计，达到限制后是否拒绝登录，成功登录后的行为是否符合约定。第 11 篇将继续讨论怎样测试 Agent 的实现，以及怎样评估它是否完成了用户任务。

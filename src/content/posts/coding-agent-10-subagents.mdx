@@ -1,0 +1,584 @@
+---
+author: 折腾客
+pubDatetime: 2026-10-10T15:35:32Z
+title: "Coding Agent 原理与实践 10（上）：子代理——怎样委派任务并回收结果"
+featured: false
+draft: false
+tags:
+  - Coding Agent
+  - ink
+  - Agent 原理
+description: 从调查登录逻辑的任务出发，解释主 Agent 怎样通过 task 工具启动独立的 Agent 循环，准备子代理的上下文与工具，再把结果带回主对话。
+---
+
+import SubagentDiagram from "@/components/series/SubagentDiagram.astro";
+
+## 1. 为什么要把一部分工作交给子代理？
+
+假设我们让 Agent 给项目的登录流程增加失败次数限制。修改之前，它需要找到认证入口，读清楚登录逻辑，再查看现有测试。为了找到这些位置，它可能搜索多个目录、读取许多文件，还要排除几条无关线索。
+
+如果这些调查都由同一个 Agent 完成，读到的源码、搜索结果和中间判断就会进入它的对话历史，并在后续调用时继续发送给模型。但到了修改阶段，真正需要的可能只是相关文件位置、现有行为和几项约束，调查中的许多细节已经用不上了。
+
+第 04 篇讲过，模型的上下文窗口有限，历史持续增长，需要整理或压缩。对于可以单独完成的调查，还有一种办法：**把调查放进独立的上下文，只将后续工作所需的结论带回主对话。**
+
+例如，负责整个任务的主 Agent 可以委派另一个 Agent：“找出当前登录流程的入口和认证逻辑，只读取文件，返回相关位置与修改建议。”受它委派、独立完成子任务的这个 Agent，就是**子代理**。
+
+子代理从委派任务开始，自己调用模型、搜索代码、读取文件，并把回复和工具结果逐步加入独立的消息历史。主 Agent 收到报告后，继续修改和测试，必要时再读取相关源码。这样，主对话可以少携带调查过程中的细节，把上下文空间留给后续工作。
+
+本篇沿着这次调查，看看主 Agent 怎样启动子代理、子代理能看到什么，以及结果怎样回来。多个子代理同时工作和修改文件的问题，留到下篇。
+
+## 2. 怎样启动子代理，并把结果交回主 Agent？
+
+第 03 篇介绍过，模型选择工具后，Agent 循环按名称找到工具实现并调用它。任务委派也可以接入这条流程：**模型通过工具调用交代子任务，Agent 启动子代理，再把它的报告作为工具结果返回。**
+
+这样，模型可以根据任务需要决定何时委派、委派什么；Agent 则可以复用工具系统已有的参数检查、执行前检查和结果保存流程。工具在这里提供的是委派入口，具体工作由工具内部启动的子代理完成。
+
+pi 和 Claude Code 也采用了工具入口，但接入方式有所不同：
+
+- pi 的[官方子代理扩展示例](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/examples/extensions/subagent/index.ts)通过扩展注册 **`subagent`** 工具，工具内部启动独立的 pi 进程，收集输出后返回。
+- Claude Code 提供内置 **`Agent`** 工具来启动子代理，并保留旧名 **`Task`** 作为兼容别名，见[官方文档](https://code.claude.com/docs/en/sub-agents#restrict-which-subagents-can-be-spawned)。
+
+Ink 把委派做成内置的 **`task`** 工具，执行函数在当前进程中启动另一次 Agent 循环。下面沿着这条调用关系看它怎样实现：
+
+<SubagentDiagram variant="flow" />
+
+### 2.1 主 Agent 如何委派任务并启动子代理？
+
+回到登录流程的调查。主 Agent 要把这部分工作交给子代理，需要说明调查目标、执行限制，以及希望得到什么结果。模型会把这些要求写进 `task` 工具调用的 `prompt` 参数。下面是模型接入层解析出的调用示例：
+
+```json
+{
+  "type": "toolCall",
+  "id": "task-1",
+  "name": "task",
+  "arguments": {
+    "prompt": "调查当前项目的登录流程。查找认证入口和失败处理逻辑，只读取文件，不修改代码。返回相关文件位置、当前行为，以及增加失败次数限制需要关注的地方。"
+  }
+}
+```
+
+这里使用前面章节的内部工具调用格式。`prompt` 是交给子代理的任务说明。这个示例未指定固定角色，子代理按默认配置启动，下面称它为**通用子代理**。
+
+收到调用后，`task` 工具准备运行配置，再调用 `runSubagent`。下面节选 Ink 的 [`task.ts`](https://github.com/FishInSalt/ink/blob/main/src/core/tools/task.ts)，展示新建子代理、共享当前工作目录时的启动部分：
+
+```ts
+// 文件：src/core/tools/task.ts
+// 所在函数：createTaskTool 返回的 execute，新建子代理分支。
+// 等待子代理运行结束，取得本次运行结果。
+outcome = await runSubagent({
+  provider, // 当前使用的模型服务
+  model: binding.wireModelId, // 默认沿用主 Agent 当前的模型
+  system: options.getSystem(), // 主 Agent 已组装好的系统指令
+  tools, // 可用工具集合，已去掉 task
+  prompt, // 模型生成的 task 调用中的任务说明
+  // ……省略角色、中断、超时、会话和其他运行配置。
+});
+```
+
+上面传入的是**启动子代理的参数**：`prompt` 指定这次委派的任务，`system` 和 `tools` 提供运行所需的指令与工具。
+
+**补充：`task` 的完整参数**
+
+本例只填写必需的 `prompt`。选择角色、限制运行时间、使用工作副本和续跑等配置，也通过工具调用的参数传入；下面列出 `taskSchema` 定义的五个参数，具体机制在对应小节展开：
+
+| 参数        | 是否必填 | 内容与作用                                                                          |
+| ----------- | -------- | ----------------------------------------------------------------------------------- |
+| `prompt`    | 是       | 字符串。新建时描述子任务，续跑时提供新的要求                                        |
+| `agent`     | 否       | 字符串。选择命名 Agent；省略时使用通用子代理，角色配置在 2.4 节介绍                 |
+| `timeoutMs` | 否       | 整数。限制本次子任务的运行时间，单位毫秒，最小为 1000；超时处理见第 4 节            |
+| `worktree`  | 否       | 布尔值。设为 `true` 时使用独立的 Git 工作副本，需要仓库已有提交；具体机制在下篇介绍 |
+| `resume`    | 否       | 字符串。用之前返回的子会话标识继续已有子代理；示例与恢复检查见 4.4 节               |
+
+`task` 工具已经把任务和运行配置交给 `runSubagent`。下面继续看子代理怎样准备自己的上下文，并开始工作。
+
+### 2.2 子代理如何准备上下文并运行？
+
+`runSubagent` 位于 [`subagent.ts`](https://github.com/FishInSalt/ink/blob/main/src/core/subagent.ts)。`task` 工具调用它之后，它创建独立的消息历史，再调用第 01 篇介绍过的 `runAgentLoop`：
+
+```ts
+// 文件：src/core/subagent.ts
+// 所在函数：runSubagent。
+const history: AgentMessage[] = options.initialHistory
+  ? [...options.initialHistory]
+  : []; // 新子代理没有 initialHistory，从空历史开始
+
+// ……省略用量记录、压缩回调和取消信号准备。
+const launchLoop = (userMessage: string | undefined) =>
+  runAgentLoop({
+    provider: options.provider,
+    model: options.model,
+    system:
+      options.system +
+      CHILD_SUFFIX +
+      (options.extraSystem
+        ? `\n\n# Agent profile\n\n${options.extraSystem}`
+        : ""),
+    tools: options.tools,
+    history,
+    userMessage,
+    maxIterations: Number.POSITIVE_INFINITY,
+    onMessage: options.onMessage,
+    onToolCall: options.onToolCall,
+    onBeforeTurn,
+    signal: child.signal,
+    // ……省略输出配置、事件转发和用量记录。
+  });
+
+// ……省略结果分类；这次调用在 try 内等待循环返回。
+const result = await launchLoop(options.prompt);
+```
+
+这段代码创建 `history`，拼接 `system`，再把任务和工具交给已有的 Agent 循环。新建子代理时没有 `initialHistory`，因此历史从空数组开始；`options.prompt` 通过 `userMessage` 传入循环。
+
+Agent 循环把这份任务说明包装成用户消息，加入 `history`。调用模型时，再把这份历史作为 `messages` 交给模型接入层。下面节选循环中的调用位置：
+
+```ts
+// 文件：src/core/loop.ts
+// 所在函数：runAgentLoop，每轮调用模型的位置。
+const assistant = await streamAssistant({
+  provider,
+  request: {
+    system,
+    messages: history,
+    tools,
+    model,
+    maxTokens,
+    thinking,
+    signal,
+  },
+  // ……省略事件转发和用量记录。
+});
+```
+
+下面分别展示**子代理首次调用模型时**的 `system`、`messages` 和 `tools`，与[第 04 篇 2.1 节](/posts/coding-agent-04-context/#21-发给模型的上下文有哪些分别从哪里来)一致。模板省略了部分提示词和工具定义细节，是结构示意。
+
+**`system`：系统指令**
+
+`system` 沿用主 Agent 已组装的系统指令，再追加 `CHILD_SUFFIX` 中的子代理说明。下面以默认系统指令为例，保留 [`system-prompt.ts`](https://github.com/FishInSalt/ink/blob/main/src/core/system-prompt.ts) 中的身份说明、工作目录和前三条工作规则：
+
+```text
+You are Ink, an open-source AI assistant and agent harness for the terminal.
+
+# Environment
+- Working directory: <工作目录的绝对路径>
+<其余运行环境字段省略>
+
+# Core rules
+1. Work inside the current working directory unless the user explicitly asks otherwise.
+2. Inspect before you modify: read a file (or list/grep via bash) before editing it. Never guess file contents.
+3. After editing code, verify the change — run it or its tests.
+<其余工作规则、工具说明，以及已加载的项目约定和扩展上下文省略>
+
+# Subagent mode
+You are a one-shot subagent: your final message is returned verbatim to the
+calling agent. Finish the task and answer — do not ask questions. You do not
+have the task tool; complete the job yourself.
+```
+
+身份说明、环境信息和基本工作规则来自主 Agent；`Subagent mode` 是新追加的说明，要求子代理完成委派任务，将最终回答返回给调用方，并明确它没有 `task` 工具。
+
+**`messages`：子代理的消息历史**
+
+首次调用时，这个数组只有一条用户消息，内容就是 `task` 调用中的 `prompt` 参数：
+
+```json
+[
+  {
+    "role": "user",
+    "content": "调查当前项目的登录流程。查找认证入口和失败处理逻辑，只读取文件，不修改代码。返回相关文件位置、当前行为，以及增加失败次数限制需要关注的地方。"
+  }
+]
+```
+
+这里没有主对话中之前读过的文件、讨论过的方案或用户提出的其他要求。例如，“不要改公共接口”如果只存在于主对话的用户消息中，就需要明确写进 `prompt`；它不会自动跟随系统指令传给子代理。
+
+子代理搜索登录相关代码、读取文件时，`messages` 会不断加入它自己的模型回复和工具结果；主对话历史仍不会自动复制过来。第 3 节再对照两份历史，展示执行过程和返回报告各自保存在哪里。
+
+**`tools`：可用工具**
+
+通用子代理沿用当前可用的工具集合，并排除 `task`。下面以 [`read`](https://github.com/FishInSalt/ink/blob/main/src/core/tools/read.ts) 和 [`bash`](https://github.com/FishInSalt/ink/blob/main/src/core/tools/bash.ts) 为例，只展示 `name` 和 `description`，分别表示工具名称与用途。说明文字用中文简写，其他工具通过注释列出：
+
+```jsonc
+[
+  {
+    "name": "read",
+    "description": "读取文件内容。",
+  },
+  {
+    "name": "bash",
+    "description": "在工作目录执行 Bash 命令，返回标准输出和错误输出。",
+  },
+  // 其他内置工具：grep、find、ls、edit、write，此处省略。
+]
+```
+
+模型接入层将工具说明转换为服务要求的格式，实际执行函数保留在本地。
+
+如已加载扩展工具，共享工作目录的子代理也可以使用它们。
+
+如果主 Agent 接入了工具执行前检查，`task` 也会将 `onToolCall` 回调传给子代理的 Agent 循环。某次工具调用被拒绝时，拒绝原因作为工具结果进入子代理的历史，模型可以据此调整下一步。执行前检查与审批机制见第 08 篇。
+
+任务里写了“只读取文件”，通用子代理仍可能拥有写文件和执行命令的工具；这是一条任务要求，不等于工具已经被禁用。2.4 节再看怎样配置工具名单。
+
+准备好这些上下文后，子代理开始查找登录流程的认证入口和失败处理逻辑。它仍通过第 01 篇介绍的 Agent 循环完成这项任务：
+
+1. 带着任务、系统指令和工具说明调用模型。
+2. 保存模型回复；如果其中有工具调用，就执行对应工具。
+3. 把工具结果加入同一份 `history`，带着更新后的历史再次调用模型。
+4. 模型不再调用工具时，结束循环，返回给 `runSubagent`。
+
+因此，子代理复用的是同一套循环，实现独立运行靠的是另一份历史、任务和工具集合。`maxIterations` 当前设为无限，用户中断和超时也能结束运行，处理方式在第 4 节说明。
+
+Ink 当前在**同一个进程中**运行这套循环。独立的是发送给模型的消息历史，并不需要为每个子代理另起一个操作系统进程。
+
+子代理的历史同样会增长。当前实现通过 `onBeforeTurn` 在再次调用模型前检查是否需要压缩，复用第 04 篇的摘要机制；这部分不再展开。
+
+子循环结束后，`runSubagent` 把本次运行的文字和状态交回 `task` 工具，再由工具将报告返回给主 Agent。
+
+### 2.3 子代理如何把结果交回主 Agent？
+
+假设子代理已经找到了登录入口和失败处理逻辑，在模型回复中给出了这样的报告：
+
+> 登录入口是 `src/auth/login.ts`；增加失败次数限制时，需要关注计数与清零条件。
+
+主 Agent 接下来要根据这份报告修改代码、运行测试。报告怎样从子代理的消息历史进入主 Agent 的下一次模型调用？
+
+**取出子代理的报告**
+
+2.1 节中的 `await runSubagent(...)` 会等子循环结束，再将返回值保存到 `outcome`。`runSubagent` 从本次运行的模型回复中取出最后可用的文本，放进返回值的 `text` 字段：
+
+```ts
+// 文件：src/core/subagent.ts
+// 所在函数：runSubagent 内部的 settled，构造本次运行的返回值。
+return {
+  status,
+  text: finalAssistantText(attemptMessages),
+  // ……省略用量等其他运行信息。
+};
+```
+
+因此，`task` 工具可以从 `outcome.text` 取得上面的报告。子代理搜索代码、读取文件的完整过程仍保留在自己的历史中，交回的是模型写出的报告。
+
+**作为 `task` 工具的输出返回**
+
+`task` 工具将整个 `outcome` 传给 `taskResult`，由它整理工具输出。下面是调用位置，报告仍保存在第一个参数 `outcome` 的 `text` 字段中：
+
+```ts
+// 文件：src/core/tools/task.ts
+// 所在函数：createTaskTool 返回的 execute，runSubagent 返回之后。
+const base = taskResult(
+  outcome,
+  session,
+  effectiveTimeout,
+  String(args.prompt)
+);
+```
+
+`taskResult` 再从 `outcome.text` 取出报告。只看本例正常有报告的路径，省略无文本兜底、截断和附加说明，核心处理可以简化为：
+
+```ts
+// 文件：src/core/tools/task.ts
+// 所在函数：taskResult；以下为正常有报告时的简化逻辑。
+const text = outcome.text;
+return { output: text, isError: false };
+```
+
+这样，子代理返回值中的 `text` 就成为 `task` 工具输出的 `output`。上面调用处的 `base` 保存这份输出，随后作为工具返回值交回调用层。下方数据示例只展示报告正文和相关字段，省略用量等附加说明：
+
+```json
+{
+  "output": "登录入口是 src/auth/login.ts；增加失败次数限制时，需要关注计数与清零条件。",
+  "isError": false
+}
+```
+
+这份返回值遵循第 03 篇介绍的工具接口，和 `read` 返回读取结果一样，先交给工具调用层。
+
+**加入主 Agent 的消息历史**
+
+工具调用层拿到上面的返回值后，把 `output` 放进统一工具结果的 `content`，再补上工具名称和调用标识。下面的 `result` 就是 `task` 返回的工具输出：
+
+```ts
+// 文件：src/core/loop.ts
+// 所在函数：runTool，取得工具执行返回值之后。
+return {
+  toolCallId: call.id,
+  toolName: call.name,
+  content: result.content ?? result.output,
+  isError: result.isError ?? false,
+  // ……省略显示信息和额外运行记录。
+};
+```
+
+主循环收集这些结果，组成一条 `toolResult` 消息，加入主 Agent 的 `history`：
+
+```ts
+// 文件：src/core/loop.ts
+// 所在函数：runAgentLoop，收集工具结果之后。
+const toolResults: AgentMessage = { role: "toolResult", results };
+history.push(toolResults);
+onMessage?.(toolResults);
+```
+
+对于 2.1 节中标识为 `task-1` 的委派，写入历史的消息包含以下内容。`toolCallId` 与那次工具调用的 `id` 对应，报告正文从 `output` 进入了 `content`：
+
+```json
+{
+  "role": "toolResult",
+  "results": [
+    {
+      "toolCallId": "task-1",
+      "toolName": "task",
+      "content": "登录入口是 src/auth/login.ts；增加失败次数限制时，需要关注计数与清零条件。",
+      "isError": false
+    }
+  ]
+}
+```
+
+主历史已经保存了那次 `task` 调用，现在又有了对应的报告。下一次调用模型时，接入层将这些消息转换成服务要求的格式。模型就能结合原任务和报告决定接下来怎样修改登录逻辑，主 Agent 再执行它生成的工具调用。
+
+实际返回中还会附上用量等说明，报告过长时会截断。`taskRecord` 等额外运行记录随会话保存，不发送给模型。中断、失败和续跑的处理留到第 4 节。
+
+### 2.4 怎样为子代理预设角色和可用工具？
+
+前面的委派通过 `prompt` 要求子代理只读取文件，但它仍然拥有修改文件的工具。如果希望每次调查都使用相同的工作要求，并且只提供读取和搜索工具，可以将这些设置保存为一份角色配置，委派时直接选用。
+
+**保存角色配置**
+
+Ink 从 `.ink/agents/` 和 `~/.ink/agents/` 加载角色配置。下面以 `scout` 为例，将配置保存为 `.ink/agents/scout.md`：
+
+```md
+---
+name: scout
+description: 调查代码，返回相关文件位置、现有行为和待确认的问题
+tools: read, grep, find
+---
+
+使用读取和搜索工具调查任务涉及的代码，不修改文件。
+报告相关文件位置、当前行为，以及尚未确认的问题。
+```
+
+这份文件中的几个部分各有作用：
+
+| 配置部分      | 作用                                                        |
+| ------------- | ----------------------------------------------------------- |
+| `name`        | 角色名称，委派时通过 `agent: "scout"` 选择这份配置          |
+| `description` | 向主 Agent 的模型介绍这个角色适合做什么，帮助它选择角色     |
+| `tools`       | 子代理可以使用的工具名称；本例只提供 `read`、`grep`、`find` |
+| 文件正文      | 加入子代理的系统指令，说明它应该怎样工作、报告哪些信息      |
+
+当前配置在启动时加载，新增或修改文件后需要重启 Ink；项目级配置还受第 08 篇的项目信任检查控制。配置保存的是可以反复使用的工作要求和工具范围，这次具体要调查什么，仍由 `task` 调用的 `prompt` 指定。
+
+**委派时按名称选择**
+
+加载配置后，Ink 会将角色的名称和 `description` 加入主 Agent 的系统指令，供模型选择。配置正文和工具名单保留在本地，用于启动对应的子代理。
+
+回到登录流程的调查，模型生成的 `task` 调用可以在 `arguments` 中增加 `agent`：
+
+```json
+{
+  "agent": "scout",
+  "prompt": "调查当前项目的登录流程，返回认证入口、失败处理逻辑，以及增加失败次数限制需要关注的地方。"
+}
+```
+
+`task` 收到调用后，根据名称找到已加载的配置。`agentsByName` 是创建工具时按角色名称建立的 Map，`args` 就是上面的调用参数：
+
+```ts
+// 文件：src/core/tools/task.ts
+// 所在函数：createTaskTool 返回的 execute，启动子代理之前。
+const wanted =
+  typeof args.agent === "string" && args.agent !== "" ? args.agent : undefined;
+const agent = wanted === undefined ? undefined : agentsByName.get(wanted);
+// ……指定了名称却找不到配置时，返回错误，不启动子代理。
+```
+
+本例找到的是 `scout` 配置。省略 `agent` 参数时，仍使用前面介绍的通用子代理。
+
+**将配置用于子代理的指令和工具**
+
+工具集合由 `selectChildToolPool` 筛选。下面的 `pool` 是为这次子代理准备的可用工具集合，`input.agent` 是刚才找到的角色配置：
+
+```ts
+// 文件：src/core/tools/task.ts
+// 所在函数：selectChildToolPool，取得可用工具集合之后。
+const filtered = pool.filter(tool => tool.name !== "task");
+if (input.agent?.tools === undefined) return filtered;
+
+const byName = new Map(filtered.map(tool => [tool.name, tool] as const));
+// ……省略工具名单中包含未知名称时的错误处理。
+return input.agent.tools
+  .map(name => byName.get(name))
+  .filter(tool => tool !== undefined);
+```
+
+未配置 `tools` 时，子代理使用可用集合中除 `task` 之外的工具；配置了名单，就只保留名单中的工具。本例最终得到 `read`、`grep`、`find`，不会提供 `edit`、`write` 或 `bash`。这一步实际改变了可调用的工具集合，不只是给模型一句“不要修改文件”的要求。两条路径都会去掉 `task`，因此当前子代理不能继续通过它委派下一层子代理。
+
+筛选后的集合保存在 `tools` 中。启动子代理时，`task` 还会将角色配置的正文作为 `extraSystem` 传入：
+
+```ts
+// 文件：src/core/tools/task.ts
+// 所在函数：createTaskTool 返回的 execute，调用 runSubagent 的位置。
+outcome = await runSubagent({
+  system: options.getSystem(), // 沿用主 Agent 已组装的系统指令
+  extraSystem: agent?.system, // 角色配置的正文
+  tools, // 筛选后的可用工具
+  prompt, // 本次委派的任务说明
+  // ……省略模型服务、模型、中断和其他运行配置。
+});
+```
+
+接着，2.2 节中的 `runSubagent` 将 `extraSystem` 以 `# Agent profile` 为标题追加到系统指令中。这样，角色正文影响 `system`，工具名单影响 `tools`，本次任务的 `prompt` 则成为子代理 `messages` 中的第一条用户消息。后面的循环运行和报告回收仍走 2.2、2.3 节介绍的流程。
+
+角色配置还可以设置模型、思考级别和超时。指定模型时，当前实现要求它属于主 Agent 正在使用的模型服务。
+
+## 3. 图解：主 Agent 和子代理分别保存了什么？
+
+把刚才的过程放进两份历史，区别会更直观。下图只展示同一次调查中的消息要点：
+
+<SubagentDiagram variant="history" />
+
+子代理读取的源码和中间判断没有自动进入主历史。主历史中，`task` 的调用标识把返回结果与这次委派对应起来。后续如果需要某段源码，主 Agent 仍可以自己读取；子代理的结论也需要结合实际代码验证。
+
+## 4. 子代理出错或中断后，怎样处理？
+
+前面看的是子代理正常返回报告的过程。如果启动失败、运行出错，或用户中途停止任务，`task` 还需要说明发生了什么。已保存的子会话，也可以用于后续继续任务。
+
+### 4.1 配置有误，子代理没能启动
+
+例如，`task` 调用指定了 `agent: "scout"`，但这份配置尚未加载。2.4 节中的查找就无法取得角色配置，`task` 会返回错误原因，并设置 `isError: true`，不会启动子代理。
+
+在还没有创建任何角色配置时，`task` 的返回值包含以下内容，仅展示 `output` 和 `isError`：
+
+```json
+{
+  "output": "unknown agent \"scout\". No agents are defined (create .ink/agents/*.md or ~/.ink/agents/*.md).",
+  "isError": true
+}
+```
+
+`output` 说明找不到名为 `scout` 的角色，并提示配置文件应放在哪些目录；`isError: true` 标记这次工具调用失败。
+
+工具名单中出现未知名称，或指定了不支持的模型配置，也会在启动前返回错误。错误结果沿着 2.3 节的工具返回流程加入主 Agent 的历史；下一次调用模型时，模型就能根据原因调整调用参数。
+
+### 4.2 用户中断或子任务超时，怎样停止运行？
+
+用户中断主 Agent 时，正在运行的子代理也需要停止；如果给子任务设置了超时时间，到时也要通知它停止。Ink 沿用第 06 篇介绍的取消信号，将这两种情况接到同一个子代理取消控制器上：
+
+```ts
+// 文件：src/core/subagent.ts
+// 所在函数：runSubagent，启动子代理的 Agent 循环之前。
+const clock =
+  timeoutMs !== undefined ? AbortSignal.timeout(timeoutMs) : undefined;
+const child = new AbortController();
+const relay = () => child.abort();
+
+// 主 Agent 被中断时，通知子代理停止。
+if (options.signal?.aborted) child.abort();
+else options.signal?.addEventListener("abort", relay);
+
+// 子任务超时时，也通知同一个控制器。
+if (clock?.aborted) child.abort();
+else clock?.addEventListener("abort", relay);
+// child.signal 传入 runAgentLoop；收尾时移除监听器。
+```
+
+`runAgentLoop` 再把 `child.signal` 传给模型接入层和工具，让正在进行的模型调用或工具操作响应停止通知。停止仍依赖它们配合取消信号，也不会撤销已经完成的文件修改。
+
+停止后，`runSubagent` 将原因记录为 `"aborted"`（主 Agent 的取消信号触发）或 `"timeout"`（子任务超时）。`taskResult` 对这两种状态都返回 `isError: true`，并在 `output` 中说明停止原因；如果子会话已经保存，还会提供历史文件位置和子会话标识，供后续继续。
+
+这两种情况对主 Agent 的影响不同：**子任务超时只停止这次子任务，主 Agent 仍可接收结果并继续原任务；用户中断整个主 Agent 时，主 Agent 也会停止，不会在收到子代理结果后自动继续调用模型。**
+
+交互终端默认不设子任务超时时间，非交互运行默认有超时限制。需要限制本次子任务的运行时长时，可以通过 `task` 的 `timeoutMs` 参数或角色配置设置。
+
+### 4.3 运行出错，已有信息怎样交回？
+
+假设子代理已经查到了认证入口，但在继续调查失败处理逻辑时，模型服务调用失败，例如服务额度已用尽。模型接入层将失败原因作为异常抛出，异常沿着子代理的 Agent 循环传到 `runSubagent`，由它捕获：
+
+```ts
+// 文件：src/core/subagent.ts
+// 所在函数：runSubagent 的 catch 分支。
+// 以下只节选本例的模型服务异常路径，省略上下文超限的恢复处理。
+const crashWith = (reason: string): SubagentOutcome => settled("crash", reason);
+const rawMessage = (e: unknown): string =>
+  e instanceof Error ? e.message : String(e);
+
+if (!isContextOverflowError(err)) {
+  return crashWith(rawMessage(err));
+}
+```
+
+`rawMessage` 取出异常的文字说明，`crashWith` 再通过 `settled` 将状态记为 `"crash"`，将说明写入返回值的 `reason`。2.3 节中的 `task` 工具收到 `outcome` 后，就能从 `outcome.reason` 取得失败原因。
+
+随后，`taskResult` 根据本次运行是否有可返回的模型回复文本，分别处理：
+
+| 本次运行已有的内容     | 返回给主 Agent 的内容                                    | 当前 `isError` |
+| ---------------------- | -------------------------------------------------------- | -------------- |
+| 没有可用的模型回复文本 | 异常原因，以及已保存历史的恢复提示（如果有）             | `true`         |
+| 有可用的模型回复文本   | 取出的文本、异常原因，以及已保存历史的续跑标识（如果有） | `false`        |
+
+这里的文本来自 2.3 节中的 `outcome.text`。`finalAssistantText` 从本次运行的消息末尾向前查找，找到含有非空文本的模型回复后，取出其中第一个非空文本块。它可能只是“已找到认证入口，接下来检查失败处理”的中间说明，未必是完整调查报告。
+
+有文本时，`taskResult` 先将保留的文本放进 `parts`，再追加失败原因，并说明前面的文字只是部分结果：
+
+```ts
+// 文件：src/core/tools/task.ts
+// 所在函数：taskResult，有可返回文本的路径。
+// 前面已将保留的文本放入 parts；无文本的异常已在其他分支返回。
+if (outcome.status === "crash") {
+  parts.push(
+    `[task] child failed after ${outcome.turns} turns: ${outcome.reason}; partial result above.`
+  );
+}
+// ……省略用量、续跑标识等附加说明。
+return { output: parts.join("\n\n"), isError: false };
+```
+
+这样，`outcome.reason` 就进入了 `task` 的 `output`，随后按 2.3 节的流程转成工具结果的 `content`，写入主 Agent 的历史。主 Agent 下一次调用模型时，模型就能读到子任务的失败原因。
+
+**当前 Ink 在有文本的异常路径上仍使用 `isError: false`，这个标记不能证明子任务已经完成。**模型还需要结合返回正文中的异常说明判断哪些结论可用、哪些工作仍未完成。
+
+如果主、子 Agent 共用的服务额度已经用尽，错误结果虽然能写入主历史，主 Agent 的下一次模型调用也可能继续失败。
+
+### 4.4 怎样接着已有子代理继续任务？
+
+子代理返回后，如果还需要查看现有登录测试，可以让它接着之前的调查继续。这既适用于正常返回报告后的追问，也适用于出错或中断后的恢复。
+
+成功保存了子会话时，`task` 的返回正文会提供子会话标识。下一次调用用 `resume` 指定它，再通过 `prompt` 说明接下来要做什么：
+
+```json
+{
+  "resume": "child-session-id",
+  "prompt": "继续检查现有登录测试，说明增加失败次数限制后需要补充哪些测试。"
+}
+```
+
+`child-session-id` 是占位符，要替换为之前返回的真实标识。Ink 检查会话后，恢复子代理自己的消息历史，再调用 `runSubagent`。下面只保留与恢复历史、新任务有关的参数：
+
+```ts
+// 文件：src/core/tools/task.ts
+// 所在函数：createTaskTool 返回的 execute，resume 分支。
+// 前面已通过恢复检查，history.messages 是从子会话重建的消息历史。
+const outcome = await runSubagent({
+  prompt: String(args.prompt), // 这次要继续完成的任务
+  initialHistory: history.messages, // 恢复子代理自己的历史
+  // ……省略沿用的模型、指令、工具和其他运行配置。
+});
+```
+
+这对应 2.2 节中的 `initialHistory` 分支：有历史时先复制已有消息，再将新的 `prompt` 加入其中。子代理可以接着之前的读取结果和讨论继续工作，完成后仍通过 `task` 返回结果。
+
+续跑还需要满足几个条件：
+
+- 沿用原子代理的模型、角色和工作目录，调用中不能再传 `agent` 或 `worktree`。
+- 系统指令、角色配置、工具集合、模型服务和工作目录等运行条件需要通过恢复检查；条件不符合要求时，Ink 会拒绝续跑。
+- 同一个子会话同时只能有一个运行向它写入历史，避免两次续跑混用同一份消息。
+
+通过检查后，实际文件内容仍可能已发生变化，子代理需要按任务重新读取和确认。
+
+## 5. 从一次委派，到多个子代理协作
+
+`task` 把一套独立的 Agent 循环接入了已有工具流程。主 Agent 提供任务，子代理独立调查，结果回到主历史，详细过程保存在子历史。
+
+接下来，如果认证逻辑和现有测试可以分别调查，能不能同时委派？如果两个子代理都要修改代码，又怎样避免互相覆盖？[下篇](/posts/coding-agent-10-concurrency/)继续讨论并发执行和文件协作。
