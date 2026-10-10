@@ -79,12 +79,6 @@ export const codingAgentChapters = [
     question: "怎样并发执行子任务、对应地交回结果，并处理共享文件的冲突？",
     postId: "coding-agent-10-concurrency",
   },
-  {
-    number: "11",
-    title: "测试与评估",
-    question: "怎样检查各模块是否按预期工作，以及 Agent 是否完成了任务？",
-    postId: "coding-agent-11-evaluation",
-  },
 ] as const;
 
 /** Dates describe checked-in milestones; they do not estimate development effort. */
