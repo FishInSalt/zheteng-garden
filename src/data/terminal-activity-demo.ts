@@ -115,7 +115,8 @@ export const activityDemos: Record<
         detail:
           "移除临时进展，保留 task 调用及其结果。某一次子工具结束，不会提前结束整项委派任务。",
         transcript:
-          agentReply + "\n● task reviewer ✓ 4.2s\n  ⎿ 已检查修改，相关测试通过。",
+          agentReply +
+          "\n● task reviewer ✓ 4.2s\n  ⎿ 已检查修改，相关测试通过。",
         activity: "⠼ working…",
       },
     ],
@@ -133,7 +134,8 @@ export function timerFrame(index: number): ActivityFrame {
   return {
     title:
       index === timerLastFrame ? "观察结束，工具仍在运行" : "工具尚未返回结果",
-    trigger: index === 0 ? "本例中的 Bash 已开始执行" : `定时器触发 · 第 ${index} 次`,
+    trigger:
+      index === 0 ? "本例中的 Bash 已开始执行" : `定时器触发 · 第 ${index} 次`,
     detail:
       index === timerLastFrame
         ? "只停止演示播放，不产生 tool_end。调用块仍显示运行耗时，不能据此判断任务完成。"

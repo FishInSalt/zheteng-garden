@@ -167,9 +167,10 @@ Ink 在 `activityTools` 中按调用 ID 保存尚未结束的普通工具，包�
 // 节选普通顶层工具路径，省略 task、子代理和 label 的准备过程。
 if (event.type === "tool_start") {
   // label 来自已准备好的工具展示信息；此处省略其构造。
-  const queued = this.runner.getTool(event.name)?.concurrencySafe === true
-    ? true
-    : undefined;
+  const queued =
+    this.runner.getTool(event.name)?.concurrencySafe === true
+      ? true
+      : undefined;
   this.activityTools.set(event.toolCallId, {
     id: event.toolCallId,
     name: event.name,
@@ -234,13 +235,13 @@ if (this.selector === null) {
 
 子代理也通过活动快照更新，但状态显示在对应的 `task` 调用块中：
 
-| 显示内容             | 数据怎样变化                       |
-| -------------------- | ---------------------------------- |
+| 显示内容             | 数据怎样变化                                                |
+| -------------------- | ----------------------------------------------------------- |
 | 子代理名称、任务摘要 | `task` 的 `tool_start` 建立记录，尚未取得执行位置时标为排队 |
-| 最近调用的工具       | 收到该子代理的 `tool_start` 时更新 |
-| 工具调用次数         | 每收到一次子代理工具开始事件就增加 |
-| 已运行时间           | `tool_running` 后开始计时，显示在调用信息末尾 |
-| 临时进展消失         | 顶层 `task` 取得结果时移除进展行，调用和结果保留 |
+| 最近调用的工具       | 收到该子代理的 `tool_start` 时更新                          |
+| 工具调用次数         | 每收到一次子代理工具开始事件就增加                          |
+| 已运行时间           | `tool_running` 后开始计时，显示在调用信息末尾               |
+| 临时进展消失         | 顶层 `task` 取得结果时移除进展行，调用和结果保留            |
 
 子代理的文字不会原样混入主 Agent 的回答。交互层根据事件附带的来源信息找到对应子代理，更新最近启动的工具和累计启动次数，再生成 `queued` 或 `pending` 进展行。某一次子工具结束，只更新该子代理的工具状态；整项委派工作是否结束，要看顶层 `task` 的结果。
 
@@ -312,11 +313,7 @@ if (matchesKey(data, "ctrl+o")) {
 // 文件：src/repl/components/tool-block.ts
 // 所在函数：ToolBlockFold.render
 // 节选正文显示预算；省略参数排版、换行、元信息和截断提示。
-const limit = this.expanded
-  ? 1000
-  : block.kind === "diff" && !semantic
-    ? 8
-    : 3;
+const limit = this.expanded ? 1000 : block.kind === "diff" && !semantic ? 8 : 3;
 ```
 
 这里限制的是相应正文的显示预算，不是整个调用块的总行数。收起时通常仍有摘要或少量预览；展开时显示更多参数、原始输出或差异，但也有显示上限和省略提示。工具在更早阶段已经截断、没有交给显示层的内容，不能靠展开按钮找回来。
