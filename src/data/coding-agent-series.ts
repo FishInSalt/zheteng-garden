@@ -74,14 +74,20 @@ export const codingAgentChapters = [
     postId: "coding-agent-10-subagents",
   },
   {
-    number: "10 下",
+    number: "10 中",
     title: "并发协作——怎样协调多个子代理",
     question: "怎样并发执行子任务、对应地交回结果，并处理共享文件的冲突？",
     postId: "coding-agent-10-concurrency",
   },
   {
+    number: "10 下",
+    title: "子代理续跑——保存了历史，为什么还不能直接继续？",
+    question: "怎样核对运行条件、修复中断记录，并避免同一子会话被同时续跑？",
+    postId: "coding-agent-10-child-resume",
+  },
+  {
     number: "11",
-    title: "Skills——怎样按需加载任务相关的工作说明",
+    title: "Skills——Agent 怎样使用任务相关的“技能”？",
     question:
       "Agent 怎样发现、加载并使用 Skill，它与项目约定、工具和扩展有什么区别？",
     postId: "coding-agent-11-skills",
@@ -110,12 +116,6 @@ export const codingAgentChapters = [
     question:
       "怎样确定模型服务、凭据和能力配置，并协调启动、切换与会话恢复时的选择？",
     postId: "coding-agent-15-model-management",
-  },
-  {
-    number: "16",
-    title: "子代理续跑——保存了历史，为什么还不能直接继续？",
-    question: "怎样核对运行条件、修复中断记录，并避免同一子会话被同时续跑？",
-    postId: "coding-agent-16-child-resume",
   },
 ] as const;
 
