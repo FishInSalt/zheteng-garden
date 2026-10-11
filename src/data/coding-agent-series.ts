@@ -79,6 +79,44 @@ export const codingAgentChapters = [
     question: "怎样并发执行子任务、对应地交回结果，并处理共享文件的冲突？",
     postId: "coding-agent-10-concurrency",
   },
+  {
+    number: "11",
+    title: "Skills——怎样按需加载任务相关的工作说明",
+    question:
+      "Agent 怎样发现、加载并使用 Skill，它与项目约定、工具和扩展有什么区别？",
+    postId: "coding-agent-11-skills",
+  },
+  {
+    number: "12",
+    title: "MCP——怎样接入外部服务提供的工具",
+    question: "怎样连接 MCP 服务、发现和调用工具，并处理连接与调用失败？",
+    postId: "coding-agent-12-mcp",
+  },
+  {
+    number: "13",
+    title: "图片输入——图片怎样进入模型的上下文",
+    question: "用户输入或工具读取的图片，怎样经过处理并进入模型请求？",
+    postId: "coding-agent-13-images",
+  },
+  {
+    number: "14",
+    title: "用量统计——一次任务消耗了多少 Token",
+    question: "怎样统计模型调用、上下文压缩和子代理的用量，并估算费用？",
+    postId: "coding-agent-14-usage",
+  },
+  {
+    number: "15",
+    title: "模型管理——切换模型时，Agent 需要改变什么？",
+    question:
+      "怎样确定模型服务、凭据和能力配置，并协调启动、切换与会话恢复时的选择？",
+    postId: "coding-agent-15-model-management",
+  },
+  {
+    number: "16",
+    title: "子代理续跑——保存了历史，为什么还不能直接继续？",
+    question: "怎样核对运行条件、修复中断记录，并避免同一子会话被同时续跑？",
+    postId: "coding-agent-16-child-resume",
+  },
 ] as const;
 
 /** Dates describe checked-in milestones; they do not estimate development effort. */

@@ -1,7 +1,7 @@
 ---
 author: 折腾客
 pubDatetime: 2026-09-23T15:09:58Z
-modDatetime: 2026-10-10T16:36:57Z
+modDatetime: 2026-10-11T08:23:31Z
 title: "Coding Agent 原理与实践 07：终端界面——回答与状态怎样实时刷新"
 featured: false
 draft: false
@@ -269,7 +269,26 @@ if (this.activityTimer === null) {
 
 ### 2.3 工具结果怎样折叠与展开？
 
-一个工具可能返回几百行日志。当前默认 TUI 使用 `ToolBlockFold` 展示工具调用和结果，用 `expanded` 记录是否展开。调用块可以显示参数详情，结果块可以显示日志、文件内容或差异；不再只是一个标题加一份字符串正文。
+一个工具可能返回几百行日志。当前默认 TUI 使用 `ToolBlockFold` 展示工具调用和结果，用 `expanded` 记录是否展开。调用块可以显示参数详情，结果块可以显示日志、文件内容或差异。
+
+**工具摘要和预览从哪里来？** 工具可以通过可选的 `presentation` 字段提供展示钩子：`call` 根据调用参数整理展示内容，`result` 根据执行结果整理展示内容。接口节选如下：
+
+```ts
+// 文件：src/core/tools/types.ts
+// 接口：ToolPresentationHooks；由 Tool.presentation 引用。
+export interface ToolPresentationHooks {
+  readonly call?: (
+    context: ToolCallPresentationContext
+  ) => ToolSemanticPresentation | undefined;
+  readonly result?: (
+    context: ToolResultPresentationContext
+  ) => ToolSemanticPresentation | undefined;
+}
+```
+
+返回值中的 `summary` 是摘要，`preview` 和 `detail` 分别提供预览与详细文字；还可以用 `argumentFields` 指定参数的显示名称和值。例如，`read` 的调用展示钩子会把 `path`、`offset`、`limit` 整理成文件路径、起始行和读取上限，用户不用只盯着一串 JSON 理解这次调用。
+
+[`tool-presentation-hooks.ts`](https://github.com/FishInSalt/ink/blob/main/src/repl/tool-presentation-hooks.ts) 负责调用和校验这些钩子；没有可用的自定义展示内容时，界面使用默认展示。钩子提供的是要显示的内容，`ToolBlockFold` 仍负责排版、折叠和渲染，不会因此再次执行工具或改变交给模型的结果。
 
 按下 Ctrl+O 后，Ink 会统一切换现有折叠组件的展开状态，其中包括工具调用块和结果块：只要有一项收起，就全部展开；已经全部展开时，就全部收起。随后请求界面刷新：
 

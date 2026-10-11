@@ -1,7 +1,7 @@
 ---
 author: 折腾客
 pubDatetime: 2026-09-18T12:35:28Z
-modDatetime: 2026-10-10T16:18:53Z
+modDatetime: 2026-10-11T06:22:52Z
 title: "Coding Agent 原理与实践 04：上下文管理：信息组织与历史压缩"
 featured: false
 draft: false
@@ -74,24 +74,42 @@ export interface LLMRequest {
 
 用户提出的“不改公共接口”保留在用户消息中，也就是 `messages`；它不会因为是一条约束，就自动移到 `system`。
 
-以项目约定为例，Ink 在 [`runner.ts`](https://github.com/FishInSalt/ink/blob/main/src/runner.ts) 中把它加入 `system`：
+Ink 先用 `buildSystemPrompt` 组装系统指令的主体，再追加项目约定等内容。下面节选 [`runner.ts`](https://github.com/FishInSalt/ink/blob/main/src/runner.ts) 中追加项目约定的部分：
 
 ```ts
 // 文件：src/runner.ts
 // 所在函数：RunnerImpl.assembleSystem
-// 节选：省略加载提示和扩展提供的上下文段落。
-let system = buildSystemPrompt(defaultSystemPromptContext());
+// system 已由前面的 buildSystemPrompt 创建；这里节选追加项目约定的部分。
+// 省略记录来源与界面提示；escapeXml 是源码导入的辅助函数。
 if (!this.options.noContextFiles) {
   const context = loadContextFiles(this.options.cwd);
   if (context) {
-    system += `\n\n# Project context (AGENTS.md)\n\n${context.text}`;
+    const inner = context.sections
+      .map(
+        s =>
+          `<project_instructions path="${escapeXml(s.path)}">\n${s.content}\n</project_instructions>\n\n`
+      )
+      .join("");
+    system += `\n\n<project_context>\n\nProject-specific instructions and guidelines:\n\n${inner}</project_context>`;
   }
 }
 ```
 
-`buildSystemPrompt` 提供基础指令和运行环境；`loadContextFiles` 读取项目约定。当前实现先查找 `~/.ink/AGENTS.md`，再从根目录到工作目录依次查找沿途的 `AGENTS.md`，把找到的内容拼接起来。因此，用户可以在项目根目录添加 `AGENTS.md`，写明编码规范、测试方式等要求，供 Agent 执行任务时遵循。
+`loadContextFiles` 返回的 `sections` 按文件保存路径 `path` 和正文 `content`。上面的代码给每份规则加上带路径的标签，再追加到 `system`，让模型知道各段约定来自哪里。例如，项目根目录的 `AGENTS.md` 可以写编码规范和测试命令；加载后，这些正文会直接出现在系统指令中。
 
-这些约定由用户或项目维护者编写，Agent 负责加载；规则冲突和信任边界留到第 08 章讨论。
+查找时，Ink 先读取全局的 `~/.ink/AGENTS.md`，再从文件系统根目录到当前工作目录，依次查找沿途的规则文件。每个目录最多采用一份：优先 `AGENTS.override.md`，其次 `AGENTS.md`，再其次 `CLAUDE.md`；后两者也支持 `.MD` 扩展名。这里的优先级用于选择同一目录里的文件；不同目录的规则仍按从远到近的顺序加入，不会由代码自动合并或消除矛盾。
+
+系统指令还有其他来源。按“放进去的是正文，还是供后续查找的目录”区分，就容易看清它们的作用：
+
+| 来源                                        | 怎样进入 `system`                                                                                                                                  |
+| ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 内置提示词、`SYSTEM.md`、`APPEND_SYSTEM.md` | 默认使用内置工作要求与环境信息；选中的 `SYSTEM.md` 替换默认提示词主体，`APPEND_SYSTEM.md` 追加正文。替换主体后仍保留工作目录，并继续组装下面的内容 |
+| 项目规则文件                                | 按上面的方式加入文件路径和正文                                                                                                                     |
+| 扩展注册的上下文                            | 追加扩展提供的说明正文                                                                                                                             |
+| Skills                                      | 有可用 `read` 工具时，加入可供模型选择的技能名称、说明和文件位置；完整正文留到需要时读取                                                           |
+| 子代理配置                                  | 加入供模型选择角色的目录；角色的完整指令留到启动对应子代理时使用                                                                                   |
+
+自定义提示文件分别从项目 `.ink/` 和全局 `~/.ink/` 中选择，项目文件需要通过信任检查。项目规则文件的加载与这道检查不同，具体见第 08 篇。Skills 的发现与按需读取留到第 11 篇展开，这里先记住：**提供一份目录，不等于已经把目录中每份文件的正文发给模型。**
 
 `messages` 对应 Agent 循环使用的消息历史数组 `history`。
 
@@ -113,8 +131,9 @@ if (!this.options.noContextFiles) {
 // 文件：src/core/compaction.ts
 // 省略参数类型。
 export function shouldCompact(contextTokens, settings) {
-  return contextTokens > (
-    settings.triggerTokens ?? settings.contextWindow - settings.reserveTokens
+  return (
+    contextTokens >
+    (settings.triggerTokens ?? settings.contextWindow - settings.reserveTokens)
   );
 }
 ```
@@ -128,10 +147,10 @@ export function shouldCompact(contextTokens, settings) {
 
 这样，大窗口也会按比例提前留下余量。用两个窗口配置举例，预留量均采用当前默认值：
 
-| 窗口配置 | 窗口的 85% | 窗口减去 32,768 | 实际压缩阈值 |
-| --- | --- | --- | --- |
-| 200,000 Token | 170,000 | 167,232 | 167,232 Token |
-| 1,000,000 Token | 850,000 | 967,232 | 850,000 Token |
+| 窗口配置        | 窗口的 85% | 窗口减去 32,768 | 实际压缩阈值  |
+| --------------- | ---------- | --------------- | ------------- |
+| 200,000 Token   | 170,000    | 167,232         | 167,232 Token |
+| 1,000,000 Token | 850,000    | 967,232         | 850,000 Token |
 
 回到运行测试的场景：若窗口是 200,000 Token，测试前估算占用 160,000 Token，不触发压缩；加入约 20,000 Token 的测试输出后，占用变成 180,000 Token，就会在下一次调用前尝试压缩。这里的判断是严格大于阈值，恰好等于阈值时还不会触发。
 
@@ -290,11 +309,11 @@ if (
 
 这里的“新信息”是相对于旧摘要而言的，**也包括上次保留原文、这次才移入摘要的消息**。沿用第 3 节图中的消息标记，把第一次生成的摘要记为 S1：第一次压缩得到 `S1 + M8 + M9`，之后又产生 `M10`、`M11`。假设第二次在 M10 前切分：
 
-| 当前历史中的内容 | 本次怎样处理 |
-| ---------------- | ------------ |
-| S1：第一次生成的摘要 | 取出正文，作为需要更新的旧摘要 |
-| M8、M9：上次保留的测试调用与结果 | 作为本次需要纳入摘要的对话 |
-| M10、M11：更近期的消息 | 继续保留原文，不送去生成摘要 |
+| 当前历史中的内容                 | 本次怎样处理                   |
+| -------------------------------- | ------------------------------ |
+| S1：第一次生成的摘要             | 取出正文，作为需要更新的旧摘要 |
+| M8、M9：上次保留的测试调用与结果 | 作为本次需要纳入摘要的对话     |
+| M10、M11：更近期的消息           | 继续保留原文，不送去生成摘要   |
 
 模型需要生成一份完整的新摘要 S2，更新成功后的历史是 `S2 + M10 + M11`。例如，S1 中“修改后尚待验证”的进展，现在应结合 M9 更新为“普通用例通过，负数用例仍失败”。这是教学示例，具体措辞仍由模型生成。
 

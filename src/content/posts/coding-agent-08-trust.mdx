@@ -1,7 +1,7 @@
 ---
 author: 折腾客
 pubDatetime: 2026-09-25T10:06:43Z
-modDatetime: 2026-10-11T05:44:40Z
+modDatetime: 2026-10-11T06:22:52Z
 title: "Coding Agent 原理与实践 08：权限与信任——怎样控制 Agent 的执行风险"
 featured: false
 draft: false
@@ -80,9 +80,12 @@ Ink 的 [`trustRequiringResources`](https://github.com/FishInSalt/ink/blob/main/
 | `.ink/settings.json`                          | 改变模型和运行设置                                |
 | `.ink/SYSTEM.md`、`.ink/APPEND_SYSTEM.md`     | 替换或补充系统指令                                |
 | 项目范围内的 `.agents/skills`                 | 加载技能；查找范围包括到 Git 根目录之间的祖先目录 |
+| 项目目录中的 `.mcp.json`、`mcp.json`          | 指定要启动的本地 MCP 服务或要连接的远端服务       |
 
 </div>
 </div>
+
+MCP 服务向 Agent 提供外部工具。项目里的 MCP 配置虽然是 JSON，也可能指定启动本地进程的命令，或连接远端服务的地址。因此，Ink 会在采用这些项目配置前检查信任决定；未获信任时，跳过这两个项目配置文件。MCP 工具怎样接入，留到第 12 篇展开。
 
 发现这些资源后，启动流程调用 `resolveProjectTrust` 决定是否放行。下面节选它的判断逻辑：`cwd` 是当前工作目录，`resources` 是筛选后需要信任的项目资源列表。
 
