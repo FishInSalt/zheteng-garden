@@ -100,7 +100,15 @@ results.push(persistableResult(result));
 ```ts
 // 文件：src/core/loop.ts
 // 节选：省略参数类型，依赖的辅助函数在后文展开。
-async function executeToolCall(id, name, args, toolMap, signal, onToolCall, grace) {
+async function executeToolCall(
+  id,
+  name,
+  args,
+  toolMap,
+  signal,
+  onToolCall,
+  grace
+) {
   const call = { id, name, arguments: args };
 
   // ① 查找工具并检查参数，失败时直接返回错误结果。
@@ -297,11 +305,11 @@ async function runTool(call, tool, record, signal) {
 
 **模型使用的内容与界面显示的内容怎样区分？** 工具返回值中的三个字段各有用途：
 
-| 工具返回字段 | 调用层怎样处理 | 例子 |
-| --- | --- | --- |
-| `output` | 没有 `content` 时，把这段字符串作为结果的 `content` | 读取 README 后返回正文，运行命令后返回输出 |
-| `content` | 存在时优先采用，作为写入历史、供模型接入层转换的内容 | 文本说明与图片附件，也可以只有文本块 |
-| `display` | 随工具结果事件交给界面，作为显示内容；写入历史前移除 | 展示编辑前后的差异 |
+| 工具返回字段 | 调用层怎样处理                                       | 例子                                       |
+| ------------ | ---------------------------------------------------- | ------------------------------------------ |
+| `output`     | 没有 `content` 时，把这段字符串作为结果的 `content`  | 读取 README 后返回正文，运行命令后返回输出 |
+| `content`    | 存在时优先采用，作为写入历史、供模型接入层转换的内容 | 文本说明与图片附件，也可以只有文本块       |
+| `display`    | 随工具结果事件交给界面，作为显示内容；写入历史前移除 | 展示编辑前后的差异                         |
 
 当前 [`messages.ts`](https://github.com/FishInSalt/ink/blob/main/src/core/messages.ts) 支持两种内容块：
 
@@ -368,10 +376,10 @@ history.push(toolResults);
 
 这个函数位于 [`loop.ts`](https://github.com/FishInSalt/ink/blob/main/src/core/loop.ts)。它读取每个工具的 `concurrencySafe` 标记，先确定执行方式：
 
-| 工具的标记 | 执行方式 |
-| --- | --- |
-| 未声明 `concurrencySafe`，或值为 `false` | 串行执行：等待当前调用结束，再处理下一个。 |
-| `concurrencySafe: true` | 将连续符合条件的调用归为一组，同时最多执行 5 个；有调用结束，就启动下一个等待中的调用。 |
+| 工具的标记                               | 执行方式                                                                                |
+| ---------------------------------------- | --------------------------------------------------------------------------------------- |
+| 未声明 `concurrencySafe`，或值为 `false` | 串行执行：等待当前调用结束，再处理下一个。                                              |
+| `concurrencySafe: true`                  | 将连续符合条件的调用归为一组，同时最多执行 5 个；有调用结束，就启动下一个等待中的调用。 |
 
 当前内置工具中，`read`、`grep`、`find`、`ls` 和用于委派子代理任务的 `task` 都声明了 `concurrencySafe: true`；`bash`、`edit`、`write` 则仍串行执行。因此，前面读取 `README.md` 和 `package.json` 的两个调用，现在可以并发执行。
 
@@ -482,7 +490,10 @@ export function createReadTool(options: ReadToolOptions = {}): Tool {
 // 文件：src/core/tools/read.ts
 // execute 的图片分支末尾；省略识别、处理、大小限制与提示文字的生成。
 const content: ContentBlock[] = [
-  { type: "text", text: `Read image file [${processed.mimeType}]${hints}${nonVisionNote}` },
+  {
+    type: "text",
+    text: `Read image file [${processed.mimeType}]${hints}${nonVisionNote}`,
+  },
   { type: "image", data: processed.data, mimeType: processed.mimeType },
 ];
 return {
@@ -512,7 +523,8 @@ return new Promise(resolve => {
     detached: process.platform !== "win32",
   });
   if (child.pid !== undefined) trackDetachedChildPid(child.pid);
-  const stdout = new StreamState(), stderr = new StreamState();
+  const stdout = new StreamState(),
+    stderr = new StreamState();
   // 省略 timedOut、aborted、settled 等状态，以及 stop、settle 和监听注册。
 
   child.stdout.on("data", (chunk: Buffer) => {
@@ -523,7 +535,10 @@ return new Promise(resolve => {
   });
   child.on("error", err => {
     if (settle()) {
-      resolve({ output: `Error: failed to spawn command: ${err.message}`, isError: true });
+      resolve({
+        output: `Error: failed to spawn command: ${err.message}`,
+        isError: true,
+      });
     }
   });
 
@@ -539,10 +554,20 @@ return new Promise(resolve => {
             : code === null
               ? "command ended without an exit status"
               : undefined;
-      const output = await formatOutput(stdout, stderr, command, error, code ?? undefined);
-      resolve(error
-        ? { output: `Error: ${error}. Partial output:\n${output}`, isError: true }
-        : { output, isError: false, exitCode: code ?? undefined }
+      const output = await formatOutput(
+        stdout,
+        stderr,
+        command,
+        error,
+        code ?? undefined
+      );
+      resolve(
+        error
+          ? {
+              output: `Error: ${error}. Partial output:\n${output}`,
+              isError: true,
+            }
+          : { output, isError: false, exitCode: code ?? undefined }
       );
     }
   );
@@ -583,12 +608,12 @@ signal.addEventListener("abort", onAbort, { once: true });
 
 ### 3.3 对照两个实现，哪些工作留在工具内部
 
-| 接口约定 | read 的实现            | bash 的实现                    |
-| -------- | ---------------------- | ------------------------------ |
-| 描述参数 | 文件路径，可选的行范围 | 命令，可选的超时时间           |
+| 接口约定 | read 的实现                  | bash 的实现                    |
+| -------- | ---------------------------- | ------------------------------ |
+| 描述参数 | 文件路径，可选的行范围       | 命令，可选的超时时间           |
 | 执行操作 | 读取文件，整理文本或处理图片 | 启动进程，收集输出与退出状态   |
-| 响应取消 | 把信号传给文件读取 API | 终止命令进程组，并结束输出等待 |
-| 返回结果 | 文本、图片附件或读取反馈 | 命令输出、退出状态或运行错误   |
+| 响应取消 | 把信号传给文件读取 API       | 终止命令进程组，并结束输出等待 |
+| 返回结果 | 文本、图片附件或读取反馈     | 命令输出、退出状态或运行错误   |
 
 两者都通过 `name`、`description`、`parameters` 描述能力，通过 `execute(args, signal)` 执行操作并返回结果。新增工具时，把这几项约定接好，就能复用第 2 节的查找、参数校验和结果包装流程。工具内部仍要负责实际操作、资源清理和具体错误原因。
 

@@ -263,12 +263,12 @@ case "toolResult": {
 
 因此，这次工具执行完成后，下一次请求里的相关消息按下面的顺序排列；表格省略了更早的用户任务和系统指令：
 
-| 顺序与角色 | 消息中的内容 |
-| --- | --- |
-| ① `assistant` | 请求两次 `read`：`t1` 读截图，`t2` 读 README |
-| ② `tool` | `tool_call_id: "t1"`，文字为 `Read image file [image/png]` |
-| ③ `tool` | `tool_call_id: "t2"`，文字为 README 的内容，例如“启动命令：npm run dev” |
-| ④ `user` | 附件说明 + 截图的实际图片数据（`image_url` 内容块） |
+| 顺序与角色    | 消息中的内容                                                            |
+| ------------- | ----------------------------------------------------------------------- |
+| ① `assistant` | 请求两次 `read`：`t1` 读截图，`t2` 读 README                            |
+| ② `tool`      | `tool_call_id: "t1"`，文字为 `Read image file [image/png]`              |
+| ③ `tool`      | `tool_call_id: "t2"`，文字为 README 的内容，例如“启动命令：npm run dev” |
+| ④ `user`      | 附件说明 + 截图的实际图片数据（`image_url` 内容块）                     |
 
 第 ②、③ 条分别回应 `t1`、`t2`，先把模型提出的这批工具调用配对补齐；第 ④ 条再携带图片。**第 ④ 条由接入层自动生成，不是用户又输入了一句话。** 如果把它插在第 ②、③ 条之间，消息序列就会在 `t2` 的结果出现之前转入一条 `user` 消息，打断这批工具结果的连续排列。
 
@@ -286,13 +286,13 @@ case "toolResult": {
 
 <div className="overflow-x-auto" tabIndex={0} role="region" aria-label="模型协议字段对照，可横向滚动">
 
-| 要表达的信息     | 本例的 Chat Completions 接入 | 项目中的 Messages API 接入          |
-| ---------------- | ---------------------------- | ----------------------------------- |
-| 系统指令         | `messages` 开头的系统消息    | 请求体单独的 `system` 字段          |
-| 模型请求工具     | `assistant.tool_calls`       | `assistant.content` 中的 `tool_use` |
-| 本地执行结果     | `role: "tool"` 消息          | `user.content` 中的 `tool_result`   |
-| 结果对应哪次调用 | `tool_call_id`               | `tool_use_id`                       |
-| 工具结果中的图片 | 连续工具结果之后，另用一条 `user` 消息携带 | 放在 `tool_result.content` 内部 |
+| 要表达的信息     | 本例的 Chat Completions 接入               | 项目中的 Messages API 接入          |
+| ---------------- | ------------------------------------------ | ----------------------------------- |
+| 系统指令         | `messages` 开头的系统消息                  | 请求体单独的 `system` 字段          |
+| 模型请求工具     | `assistant.tool_calls`                     | `assistant.content` 中的 `tool_use` |
+| 本地执行结果     | `role: "tool"` 消息                        | `user.content` 中的 `tool_result`   |
+| 结果对应哪次调用 | `tool_call_id`                             | `tool_use_id`                       |
+| 工具结果中的图片 | 连续工具结果之后，另用一条 `user` 消息携带 | 放在 `tool_result.content` 内部     |
 
 </div>
 
