@@ -1,7 +1,7 @@
 ---
 author: 折腾客
 pubDatetime: 2026-09-17T16:16:36Z
-modDatetime: 2026-09-19T15:54:45Z
+modDatetime: 2026-10-10T16:55:40Z
 title: "Coding Agent 原理与实践 03：工具系统：定义、调用与反馈"
 featured: false
 draft: false
@@ -49,6 +49,7 @@ const toolMap = new Map(tools.map(t => [t.name, t]));
 // 收到并保存模型回复后：取出其中的工具调用。
 const toolCalls = assistant.blocks.filter(b => b.type === "toolCall");
 // 省略没有工具调用、达到轮次上限时的结束判断。
+// 下文只展示未被 max_tokens 截断的回复；截断时会拒绝整批调用，见第 02 下篇 4.4 节。
 const results = [];
 await executeToolBatch(
   toolCalls,
@@ -56,7 +57,8 @@ await executeToolBatch(
   signal,
   onToolCall,
   onEvent,
-  results
+  results,
+  clock
 );
 ```
 
@@ -74,7 +76,7 @@ await executeToolBatch(
 
 ```ts
 // 文件：src/core/loop.ts
-// 所在函数：executeToolBatch
+// 所在函数：executeToolBatchInner，由 executeToolBatch 调用。
 // 节选：省略类型；此片段不能直接运行。
 // 串行分支：处理第 i 个工具调用。
 // 省略遍历、取消检查、串行/并发判断和事件通知。
@@ -85,19 +87,20 @@ const result = await executeToolCall(
   call.arguments,
   toolMap,
   signal,
-  onToolCall
+  onToolCall,
+  grace
 );
-results.push(result);
+results.push(persistableResult(result));
 ```
 
-一条回复可能包含多个工具调用，由 `executeToolBatch` 安排它们的执行。这里节选串行分支中的一次调用：取出 `toolCalls[i]`，把它的 ID、名称和参数交给 `executeToolCall`，等待返回后将结果加入 `results`。后续调用仍由 `executeToolBatch` 继续处理，多次调用的执行安排在 2.5 节讨论。
+一条回复可能包含多个工具调用，由 `executeToolBatch` 内部的 `executeToolBatchInner` 安排执行。这里节选串行分支中的一次调用：取出 `toolCalls[i]`，把它的 ID、名称和参数交给 `executeToolCall`，等待返回后去掉仅供界面展示的字段，将结果加入 `results`。其中 `grace` 用于约束取消后的等待时间，这里先不展开。连续允许并发的调用则交给 `executeChunk`；两条路径都要查找工具、检查参数并经过执行前回调，具体调度在 2.5 节讨论。
 
 **`executeToolCall`：查找、检查并执行一次工具调用。**
 
 ```ts
 // 文件：src/core/loop.ts
 // 节选：省略参数类型，依赖的辅助函数在后文展开。
-async function executeToolCall(id, name, args, toolMap, signal, onToolCall) {
+async function executeToolCall(id, name, args, toolMap, signal, onToolCall, grace) {
   const call = { id, name, arguments: args };
 
   // ① 查找工具并检查参数，失败时直接返回错误结果。
@@ -110,13 +113,14 @@ async function executeToolCall(id, name, args, toolMap, signal, onToolCall) {
     return {
       toolCallId: id,
       toolName: name,
-      content: `Tool "${name}" blocked by an extension: ${decision.reason ?? "no reason given"}`,
+      content: `Tool "${name}" blocked by ${blockSource(decision)}: ${decision.reason ?? "no reason given"}`,
       isError: true,
     };
   }
 
-  // ③ 最终由 runTool 调用对应工具的 execute，统一整理结果。
-  return prepared.run(signal);
+  // ③ runTool 调用对应工具的 execute；grace 约束取消后的等待。
+  const result = await grace.race(prepared.run(signal), name);
+  return { ...result, toolCallId: id };
 }
 ```
 
@@ -130,7 +134,8 @@ async function executeToolCall(id, name, args, toolMap, signal, onToolCall) {
 
 ```ts
 // 文件：src/core/tools/types.ts
-// 模块级接口定义；结果类型在此展开，省略可选的命令退出码。
+// 接口节选；结果类型在此展开，省略呈现钩子、命令退出码和 task 元数据等字段。
+// ContentBlock 来自 src/core/messages.ts，具体结构见 2.4 节。
 interface Tool {
   name: string;
   description: string;
@@ -138,10 +143,13 @@ interface Tool {
   concurrencySafe?: boolean;
   execute(
     args: Record<string, unknown>,
-    signal: AbortSignal
+    signal: AbortSignal,
+    context?: { toolCallId: string }
   ): Promise<{
     output: string;
     isError?: boolean;
+    content?: ContentBlock[];
+    display?: string;
   }>;
 }
 ```
@@ -152,9 +160,9 @@ interface Tool {
 - `description`：用途和使用限制，帮助模型判断什么时候该用它。
 - `parameters`：输入规则，说明哪些字段必填、是什么类型。`TSchema` 是 TypeBox 库表示这些规则的类型。
 
-`execute` 是本地执行入口：接收参数和中断信号，异步返回输出与错误标记。`concurrencySafe` 则向调度方声明是否允许并发，后面再讨论。
+`execute` 是本地执行入口：接收参数和中断信号，异步返回输出与错误标记；结果还可以包含结构化的 `content` 和用于界面显示的 `display`。可选的 `context` 由调用层提供本次调用 ID，不是让模型填写的工具参数。`concurrencySafe` 则向调度方声明是否允许并发，后面再讨论。
 
-例如，`read` 的参数需要文件路径，`bash` 的参数需要命令。工具内部处理方式不同，调用方却都只需执行 `tool.execute(args, signal)`。以后增加一个工具，仍遵守这一约定，Agent 循环就不必了解它怎样操作外部环境。
+例如，`read` 的参数需要文件路径，`bash` 的参数需要命令。工具内部处理方式不同，调用方却都通过同一个 `execute` 入口执行。以后增加一个工具，仍遵守这一约定，Agent 循环就不必了解它怎样操作外部环境。
 
 接口之外还需要约定行为：取消后是否停止、错误怎样返回、输出会不会过大。只让函数签名相同，还不足以保证工具可以可靠地配合运行。
 
@@ -259,18 +267,20 @@ function prepareToolCall(call, toolMap) {
 
 ```ts
 // 文件：src/core/loop.ts
-// 省略参数类型。
+// 省略参数类型，以及返回结果中的 taskRecord 元数据。
 async function runTool(call, tool, record, signal) {
   try {
     const result = await tool.execute(
       record,
-      signal ?? new AbortController().signal
+      signal ?? new AbortController().signal,
+      { toolCallId: call.id }
     );
     return {
       toolCallId: call.id,
       toolName: call.name,
-      content: result.output,
+      content: result.content ?? result.output,
       isError: result.isError ?? false,
+      display: result.display,
     };
   } catch (err) {
     return {
@@ -283,10 +293,29 @@ async function runTool(call, tool, record, signal) {
 }
 ```
 
-这里可以看到两份结果的分工：
+调用层补上 `toolCallId`、`toolName`，使结果与原工具调用对应。但结果不一定只是一段字符串：读取文本、读取图片和显示编辑差异，需要承载的内容不同。
 
-- **工具实现返回** `output` 和可选的 `isError`，描述本次操作的输出。
-- **调用层补上** `toolCallId`、`toolName`，把输出放入 `content`，使结果与原工具调用对应。
+**模型使用的内容与界面显示的内容怎样区分？** 工具返回值中的三个字段各有用途：
+
+| 工具返回字段 | 调用层怎样处理 | 例子 |
+| --- | --- | --- |
+| `output` | 没有 `content` 时，把这段字符串作为结果的 `content` | 读取 README 后返回正文，运行命令后返回输出 |
+| `content` | 存在时优先采用，作为写入历史、供模型接入层转换的内容 | 文本说明与图片附件，也可以只有文本块 |
+| `display` | 随工具结果事件交给界面，作为显示内容；写入历史前移除 | 展示编辑前后的差异 |
+
+当前 [`messages.ts`](https://github.com/FishInSalt/ink/blob/main/src/core/messages.ts) 支持两种内容块：
+
+```ts
+type ContentBlock =
+  | { type: "text"; text: string }
+  | { type: "image"; data: string; mimeType: string };
+```
+
+图片块的 `data` 是 Base64 编码的数据，`mimeType` 表示图片格式。这里的“结构化内容”指这两种明确的块类型，不是任意 JSON 对象。
+
+注意 `result.content ?? result.output` 的含义：**有 `content` 时，不会再把 `output` 自动追加进去。** 如果图片之外还有模型需要知道的说明，工具必须把说明也放进 `content` 的文本块。
+
+[`edit.ts`](https://github.com/FishInSalt/ink/blob/main/src/core/tools/edit.ts) 就利用了这一区分：编辑成功后，`content` 中只有类似 `Edited src/app.ts: 2 edits applied.` 的简短确认，`display` 中则包含各处修改的差异。用户能检查修改细节，下一次模型请求不用重复携带整份差异。界面没有收到 `display` 时，会通过 `contentText` 提取 `content` 中的文字；这个函数不会把图片的 Base64 数据当作正文显示。
 
 无论工具主动返回失败，还是执行函数抛出异常，调用方都能拿到相同结构的结果。参数校验失败、执行前被拒绝时，工具虽然没有真正执行，调用层也会返回同样结构的结果。因此，Agent 循环可以统一收集这些结果并写入历史；具体失败原因则保存在 `content` 中。
 
@@ -303,7 +332,8 @@ await executeToolBatch(
   signal,
   onToolCall,
   onEvent,
-  results
+  results,
+  clock
 );
 
 // ……省略中断后的结果补齐与结束判断。
@@ -311,11 +341,11 @@ const toolResults = { role: "toolResult", results };
 history.push(toolResults);
 ```
 
-`executeToolBatch` 将各次调用的结果收集到 `results` 中，Agent 循环再把它们放进一条 `toolResult` 消息，写入 `history`。下一次调用模型时，模型接入层会将这条消息转换成服务要求的格式，具体过程见第 02 章。
+`executeToolBatch` 在收集各次调用的结果时，通过 `persistableResult` 去掉仅用于显示的 `display`、`durationMs`，再放入 `results`。Agent 循环把这些结果组成一条 `toolResult` 消息，写入 `history`。因此，这两个显示字段不会随工具结果存进会话记录；`content` 中的文本和图片块则会保留。下一次调用模型时，模型接入层会将内部消息转换成服务要求的格式，具体过程见第 02 章。
 
 统一结果格式时，也要保留判断操作结果所需的信息，例如命令的退出码和测试输出，不能只凭 `isError` 判断测试是否通过。输出过长时，还需要给出截断提示和继续获取内容的方法；上下文的选择与压缩留到第 04 章展开。
 
-调用层还会通过 `tool_start`、`tool_end` 通知交互层更新执行状态，事件怎样驱动交互留到第 06 章，具体展示方式留到第 07 章。
+调用层还会通过事件通知交互层更新执行状态。除了 `tool_start`、`tool_end`，并发路径还有区分实际开始与完成的事件，下一节会说明它们的作用；事件怎样驱动交互留到第 06 章，具体展示方式留到第 07 章。
 
 ### 2.5 工具调度：多个调用怎样安排执行
 
@@ -329,30 +359,35 @@ history.push(toolResults);
 
 这个函数位于 [`loop.ts`](https://github.com/FishInSalt/ink/blob/main/src/core/loop.ts)。它读取每个工具的 `concurrencySafe` 标记，先确定执行方式：
 
-| 工具的标记                               | 执行方式                                                |
-| ---------------------------------------- | ------------------------------------------------------- |
-| 未声明 `concurrencySafe`，或值为 `false` | 串行执行：等待当前调用结束，再处理下一个。              |
-| `concurrencySafe: true`                  | 将连续符合条件的调用分组，每批最多 5 个，分批并发执行。 |
+| 工具的标记 | 执行方式 |
+| --- | --- |
+| 未声明 `concurrencySafe`，或值为 `false` | 串行执行：等待当前调用结束，再处理下一个。 |
+| `concurrencySafe: true` | 将连续符合条件的调用归为一组，同时最多执行 5 个；有调用结束，就启动下一个等待中的调用。 |
 
-当前 `read`、`bash` 都没有声明这个标记，因此仍串行执行。遇到串行调用时，前面的并发批次必须先完成；串行调用结束后，才能继续处理后面的调用。
+当前内置工具中，`read`、`grep`、`find`、`ls` 和用于委派子代理任务的 `task` 都声明了 `concurrencySafe: true`；`bash`、`edit`、`write` 则仍串行执行。因此，前面读取 `README.md` 和 `package.json` 的两个调用，现在可以并发执行。
 
-对于一个并发批次，`executeToolBatch` 会交给 `executeChunk` 处理，整个过程如下：
+**串行调用仍是前后两组之间的边界。** 假设调用顺序是 `read A → grep B → bash C → read D`，那么 A、B 可以并发，但它们都结束后才能执行 C；C 结束后才能执行 D。调度器不会为了填满并发位置，越过 C 提前执行 D。
 
-1. **逐个检查**：`executeChunk` 按调用顺序检查参数，检查通过后调用执行前钩子 `onToolCall`。
-2. **同时执行**：通过参数检查且未被钩子拦截的调用一起启动；检查失败或被拦截的调用只保留错误结果。
-3. **收集结果**：等待整批完成，再按原调用顺序保存结果、发送 `tool_end`，不会按完成先后打乱排列。
-4. **继续下一批**：当前批次处理完后，`executeToolBatch` 才启动下一批。
+对于连续允许并发的一组调用，`executeToolBatchInner` 会交给 `executeChunk` 处理：
 
-目前内置工具中，只有用于委派子代理任务的 [`task`](https://github.com/FishInSalt/ink/blob/main/src/core/tools/task.ts) 显式设置了 `concurrencySafe: true`。它的说明要求只委派相互独立的任务；这个标记本身不会检查两个子代理是否修改了同一个文件。这里的 5 是当前调度批次的上限，也不是整个系统中所有子代理和工具调用的全局上限。
+1. **先检查整组调用**：按调用顺序检查参数，并对检查通过的调用依次执行 `onToolCall`。整组检查结束后，才开始执行获准的调用。检查失败或被拦截的调用只产生错误结果，不占并发位置。
+2. **用滑动窗口安排执行**：最多同时执行 5 个获准的调用。只要其中一个结束，就按原调用顺序取下一个等待中的调用补上，不必等正在执行的其他调用全部结束。
+3. **及时更新界面**：并发路径中的 `tool_start` 先登记调用，此时它可能还在等待检查或执行位置；实际开始执行时发送 `tool_running`，执行结束时发送 `tool_settled`。因此，界面可以及时显示某个调用已完成，执行耗时也不包含排队时间。
+4. **按调用顺序收集结果**：从第一个尚未交付的调用开始，连续收集已经完成的结果，并依次发送 `tool_end`。遇到未完成的调用就停下来，等它结束后继续。结果顺序稳定，同时也不用每次都等整组结束才开始收集。
+
+例如，一组有 A 到 G 共 7 个获准的读取调用，先启动 A 到 E。即使 A 很慢，只要 B 先结束，F 就可以开始，界面也能显示 B 已完成。不过，B 的 `tool_end` 和结果收集仍要等 A：等 A 完成后，才能按 A、B 的顺序交付；如果 C 也已完成，就继续收集 C。
+
+这里要分清**工具完成、结果收集和模型收到反馈**三个时点。`tool_settled` 可以及时更新界面，`tool_end` 随有序结果一起交付；Agent 循环仍会等这一条模型回复中的工具调用全部处理完，再将 `results` 写入历史，供下一次模型请求使用。
 
 **当前设计的取舍与局限**
 
-作为起步方案，默认串行、显式开启并发是合理的：执行顺序容易追踪，新增工具也不会未经确认就参与并发；分批执行还能限制单批资源消耗。不过，它有两处明显的取舍：
+默认串行、显式开启并发，让新增工具不会未经声明就参与并发；滑动窗口则减少了执行位置空闲时的等待。不过，这套机制仍有边界：
 
-- **判断粒度较粗。** 标记附在工具上，但冲突发生在具体调用之间。两个独立的 `read` 仍会串行执行，而两个 `task` 即使操作同一份文件，也可能同时启动。前者损失一些效率，后者需要额外的资源约束。
-- **批次会等待最慢的调用。** 假设第一批中 4 个调用很快结束，剩下 1 个很慢，第 6 个调用仍要等待；已经完成的结果也要等整批结束才通过 `tool_end` 通知界面。
+- **标记不分析具体调用之间的冲突。** 只读工具可以一起执行，但这不保证读取期间没有外部写入，也不保证几次读取来自同一时刻的文件快照。两个 `task` 即使操作同一份文件，也可能同时启动；[`task`](https://github.com/FishInSalt/ink/blob/main/src/core/tools/task.ts) 的说明要求任务相互独立，调度标记本身不会检查这一点。
+- **上限约束的是当前这一组调用。** 5 是这一层调度的并发上限，不是整个进程、所有会话或所有子代理共享的全局额度。
+- **有序交付仍可能等待较早的慢调用。** 后面的调用可以继续执行，也可以先在界面显示完成，但它们的 `tool_end` 要按顺序交付。后续串行调用和下一次模型请求，也仍要等待前面的调用处理完。
 
-因此，可以保留默认串行的做法，但不能把 `concurrencySafe` 当作已经解决了依赖和冲突。是否需要更复杂的调度，要看实际等待时间和冲突情况。
+因此，滑动窗口解决的是并发位置怎样持续利用的问题；是否存在调用依赖或资源冲突，仍需要额外判断。
 
 **更完整的工具调度需要考虑什么**
 
@@ -366,15 +401,15 @@ history.push(toolResults);
 - **执行控制**：调用开始前怎样检查参数和权限，执行过程中怎样处理取消、超时与失败？
 - **结果交付**：怎样将结果与原调用对应，及时反馈执行状态，并完整保留成功、失败或取消的结果？
 
-当前 Ink 通过并发标记和固定批次实现了基础调度，还没有根据具体调用的依赖与资源冲突来安排执行。后续是否扩展这些能力，可以结合实际任务的复杂度逐步决定。
+当前 Ink 通过并发标记、滑动窗口和按调用顺序收集结果实现了基础调度，还没有根据具体调用的依赖与资源冲突来安排执行。后续是否扩展这些能力，可以结合实际任务的复杂度逐步决定。
 
 ## 3. 两个工具，怎样接入同一套系统
 
-第 2 节的调用流程最终走到 `tool.execute(args, signal)`。接下来打开两个工具的实现，看看它们怎样接住参数和中断信号，又怎样把结果交回来。
+第 2 节的调用流程最终走到工具的 `execute`。接下来打开两个工具的实现，看看它们怎样接住参数和中断信号，又怎样把结果交回来。
 
 ### 3.1 read：接收路径，返回文件内容
 
-下面节选自 [`read.ts`](https://github.com/FishInSalt/ink/blob/main/src/core/tools/read.ts)。保留工具定义、路径检查、读取操作和返回结果；缩短了工具说明，省略 `offset`、`limit` 参数及内容裁剪细节。注释标出了省略位置，代码不能单独运行。
+`read` 既能读取文本，也能把支持的图片作为附件返回。先沿着读取 README 的路径看实现：下面节选自 [`read.ts`](https://github.com/FishInSalt/ink/blob/main/src/core/tools/read.ts)，保留工具定义、路径检查、读取操作和文本结果；缩短了工具说明，省略 `offset`、`limit` 参数及校验、图片分支和内容裁剪细节。注释标出了省略位置，代码不能单独运行。
 
 ```ts
 // 文件：src/core/tools/read.ts
@@ -390,14 +425,15 @@ export function createReadTool(options: ReadToolOptions = {}): Tool {
   const cwd = options.cwd ?? process.cwd();
   return {
     name: "read",
-    description: "Read the contents of a text file.", // 缩短后的说明
+    concurrencySafe: true,
+    description: "Read text files or attach supported images.", // 缩短后的说明
     parameters: readSchema,
     async execute(args, signal) {
       const requested = String(args.path ?? "");
       if (requested.trim() === "") {
         return { output: "Error: no path given", isError: true };
       }
-      const absolute = path.resolve(cwd, requested);
+      const absolute = resolveReadPath(requested, cwd);
 
       let bytes: Buffer;
       try {
@@ -411,7 +447,8 @@ export function createReadTool(options: ReadToolOptions = {}): Tool {
         };
       }
 
-      // 省略二进制检查、解码、行范围检查与裁剪。
+      // 省略图片识别与处理分支，下文单独说明。
+      // 非图片文件继续进行二进制检查、解码、行范围检查与裁剪，此处省略。
       // 这些代码从 bytes 得到 selected（正文）和 notes（裁剪说明）。
       const output =
         notes.length > 0 ? `${selected}\n\n${notes.join("\n")}` : selected;
@@ -426,104 +463,123 @@ export function createReadTool(options: ReadToolOptions = {}): Tool {
 1. `parameters` 告诉模型需要提供 `path`，也让调用层可以检查它是不是字符串。
 2. `execute` 继续检查字符串是否为空，并按工具创建时的工作目录解析路径。这些属于读取工具自己的规则。
 3. `readFile` 执行读取，接收同一个 `signal`；读取失败时，工具把错误原因放进 `output`。
-4. 成功时返回文件内容和 `isError: false`。工具不用填写调用 ID，也不用直接修改 `history`，这些由前面的调用层和 Agent 循环完成。
+4. 文本读取成功时返回文件内容和 `isError: false`。工具不用填写结果中的调用 ID，也不用直接修改 `history`，这些由前面的调用层和 Agent 循环完成。
 
 因此，`parameters` 和 `execute` 各自负责一部分检查：前者描述参数结构，后者处理“这个路径能不能读取”等实际操作中的问题。
+
+**如果读取的是图片呢？** `readFile` 得到字节后，工具先用 `detectSupportedImageMimeType` 根据文件内容识别支持的图片格式，而不是只看扩展名。命中图片分支后，`processImage` 负责格式转换、方向修正和按配置缩放；处理成功、大小符合限制时，返回文本说明与图片块：
+
+```ts
+// 文件：src/core/tools/read.ts
+// execute 的图片分支末尾；省略识别、处理、大小限制与提示文字的生成。
+const content: ContentBlock[] = [
+  { type: "text", text: `Read image file [${processed.mimeType}]${hints}${nonVisionNote}` },
+  { type: "image", data: processed.data, mimeType: processed.mimeType },
+];
+return {
+  output: `Read image file [${processed.mimeType}]${hints}${nonVisionNote}`,
+  content,
+};
+```
+
+这里没有把图片解码成文本正文，而是交给模型接入层转换成图片输入。处理失败或无法满足大小限制时，工具只返回省略图片的文字说明。
+
+**读到图片不等于当前模型能看图。** 如果 Ink 判定当前模型不支持图片，模型接入层会在构造本次请求时，用文字占位替换图片块；这一步不修改已有历史中的图片块。工具负责取得内容，接入层负责按当前模型能力和协议发送，两者仍沿用前面的统一结果约定。
 
 ### 3.2 bash：把进程事件转换成工具结果
 
 运行测试需要等待命令启动、输出内容、最后退出。虽然过程比读取文件复杂，对调用层来说，仍然是等待 `execute` 返回一个结果。
 
-下面节选自 [`bash.ts`](https://github.com/FishInSalt/ink/blob/main/src/core/tools/bash.ts)，先看正常执行和启动失败的路径。工具说明已缩短，超时、取消和输出缓冲的实现省略；其中 `finish` 是源码里的收尾函数，负责防止重复返回、清理超时计时器与中断监听器，最后调用 `resolve(result)`。
+下面节选自 [`bash.ts`](https://github.com/FishInSalt/ink/blob/main/src/core/tools/bash.ts) 的 `execute` 方法，省略外层工具定义、参数检查，以及输出缓冲和停止逻辑的实现。`StreamState` 收集输出，`settle()` 则防止重复收尾，并清理计时器、取消监听和进程跟踪记录；真正交付结果的是 `resolve(result)`。
 
 ```ts
 // 文件：src/core/tools/bash.ts
-// 模块级参数定义；下方为创建工具的函数。
-const bashSchema = Type.Object({
-  command: Type.String({ description: "Bash command to execute" }),
-  // 省略可选的 timeout 参数。
+// 所在函数：createBashTool 返回的工具对象的 execute 方法。
+// 节选：省略外层定义、参数检查与辅助逻辑；此片段不能直接运行。
+return new Promise(resolve => {
+  const child = spawn("/bin/bash", ["-c", command], {
+    cwd,
+    env: { ...process.env, INK: "1" },
+    detached: process.platform !== "win32",
+  });
+  if (child.pid !== undefined) trackDetachedChildPid(child.pid);
+  const stdout = new StreamState(), stderr = new StreamState();
+  // 省略 timedOut、aborted、settled 等状态，以及 stop、settle 和监听注册。
+
+  child.stdout.on("data", (chunk: Buffer) => {
+    if (!settled) stdout.append(chunk);
+  });
+  child.stderr.on("data", (chunk: Buffer) => {
+    if (!settled) stderr.append(chunk);
+  });
+  child.on("error", err => {
+    if (settle()) {
+      resolve({ output: `Error: failed to spawn command: ${err.message}`, isError: true });
+    }
+  });
+
+  void waitForChildProcess(child, { killSignal: signal }).then(
+    async ({ code, signal: exitSignal }) => {
+      if (!settle()) return;
+      const error = timedOut
+        ? `command timed out after ${timeoutSec}s and was killed`
+        : aborted
+          ? "command aborted by user"
+          : exitSignal
+            ? `command terminated by signal ${exitSignal}`
+            : code === null
+              ? "command ended without an exit status"
+              : undefined;
+      const output = await formatOutput(stdout, stderr, command, error, code ?? undefined);
+      resolve(error
+        ? { output: `Error: ${error}. Partial output:\n${output}`, isError: true }
+        : { output, isError: false, exitCode: code ?? undefined }
+      );
+    }
+  );
 });
-
-export function createBashTool(options: BashToolOptions = {}): Tool {
-  const cwd = options.cwd ?? process.cwd();
-  return {
-    name: "bash",
-    description: `Execute a bash command in the working directory (${cwd}) and return stdout/stderr.`,
-    parameters: bashSchema,
-    async execute(args, signal): Promise<ToolExecuteResult> {
-      const command = String(args.command ?? "");
-      if (command.trim() === "") {
-        return { output: "Error: empty command", isError: true };
-      }
-      // 省略 timeout 参数检查。
-      return new Promise<ToolExecuteResult>(resolve => {
-        const child = spawn("/bin/bash", ["-c", command], {
-          cwd,
-          env: { ...process.env, Ink: "1" },
-        });
-        const stdout = newState();
-        const stderr = newState();
-        // 省略计时器、signal 监听和 finish 的定义；下方单独看取消逻辑。
-
-        // 收集命令输出，尚未向调用层交付最终结果。
-        child.stdout.on("data", (chunk: Buffer) =>
-          appendChunk(stdout, chunk.toString("utf8"))
-        );
-        child.stderr.on("data", (chunk: Buffer) =>
-          appendChunk(stderr, chunk.toString("utf8"))
-        );
-        child.on("error", err => {
-          finish({
-            output: `Error: failed to spawn command: ${err.message}`,
-            isError: true,
-          });
-        });
-        child.on("close", async code => {
-          // 源码先处理超时和取消：返回错误及已有输出，并提前结束。
-          // 这里省略这两个分支，只保留正常退出路径。
-          const output = await formatOutput(
-            stdout,
-            stderr,
-            command,
-            code ?? undefined
-          );
-          finish({ output, isError: false, exitCode: code ?? undefined });
-        });
-      });
-    },
-  };
-}
 ```
 
-`spawn` 启动命令后，输出和退出通知会陆续到达。这里用一个 Promise 把这些事件接起来：`data` 事件收集输出，`error` 或 `close` 事件进入收尾逻辑，再通过 `finish` 交付结果。调用层不需要知道进程事件的细节，只需等待这个 Promise。
+`spawn` 启动命令后，`data` 事件持续收集输出；启动失败由 `error` 处理，退出与取消则由 `waitForChildProcess` 协调，最后交付工具结果。调用层只需等待这个 Promise。
 
-`formatOutput` 负责整理标准输出、标准错误和退出状态。注意正常退出路径中的 `isError: false`：在当前 Ink 中，它不能保证命令执行成功。非零退出码会写进 `output`，工具也额外返回 `exitCode`；第 2.4 节的通用包装只取 `output` 和 `isError`，因此模型要从输出中判断测试是否通过。
+**为什么不直接等待 `close`？** 假设 shell 启动了一个后代进程，后者继承了标准输出管道。即使 shell 已经退出，只要后代仍持有管道，`close` 就可能迟迟不到。当前 [`wait-child.ts`](https://github.com/FishInSalt/ink/blob/main/src/core/wait-child.ts) 主要根据进程的 `exit` 和输出流状态收尾：进程退出且两条输出流都结束时立即返回；否则等待输出连续安静 100 毫秒，后续数据会重置这个等待，但退出后的总等待最多 2 秒。这样既尽量保留末尾输出，也避免管道一直不关闭而卡住。
 
-再看刚才省略的中断监听，它位于同一个 Promise 内部：
+用户取消时，传入的 `killSignal` 会直接结束这段等待，不必等到 `exit` 或 `close`，随后返回中断原因和已收集的部分输出。**结束等待与终止进程是两件事**，终止动作由下面的 `stop()` 负责。
+
+`formatOutput` 负责整理标准输出、标准错误和退出状态。注意正常退出路径中的 `isError: false`：它不能保证命令执行成功。非零退出码会写进 `output`，工具也额外返回 `exitCode`；当前 `runTool` 不会将 `exitCode` 单独转交给模型，因此模型仍需结合输出判断测试是否通过。
+
+再看刚才省略的停止逻辑和取消监听，它们位于同一个 Promise 内部：
 
 ```ts
 // 文件：src/core/tools/bash.ts
 // 所在函数：createBashTool 返回的工具对象的 execute 方法
-// 位于 new Promise 的回调内，注册取消监听。
-let aborted = false;
+// 位于 new Promise 的回调内；省略状态变量的初始化。
+const stop = () => {
+  if (settled || stopping) return;
+  stopping = true;
+  if (child.pid === undefined) return;
+  untrackDetachedChildPid(child.pid);
+  killProcessTree(child.pid);
+};
 const onAbort = () => {
-  aborted = true; // close 分支据此返回取消结果。
-  child.kill("SIGTERM");
-  setTimeout(() => child.kill("SIGKILL"), KILL_GRACE_MS).unref();
+  aborted = true;
+  stop();
 };
 signal.addEventListener("abort", onAbort, { once: true });
 ```
 
-`read` 可以把信号直接交给 `readFile`；这里的 `bash` 则自己监听信号，先请求子进程终止，再安排强制终止。源码中的宽限时间是 2 秒。这里操作的是启动的子进程，不能据此认为它创建的所有后代进程都已停止。
+在 macOS、Linux 这类 POSIX 平台上，前面的 `detached: true` 让命令拥有独立进程组。[`killProcessTree`](https://github.com/FishInSalt/ink/blob/main/src/core/process-tree.ts) 会直接向这个组发送 `SIGKILL`，覆盖仍在同一组内的后代；组终止失败时，再尝试终止直接子进程。这里没有先发 `SIGTERM`、等 2 秒再升级的步骤。上文的 2 秒用于限制退出后的输出等待，两者含义不同。
+
+这仍然是尽力终止：后代如果另建进程组或会话，就可能脱离原组；发送信号失败也不代表进程已经消失。工具返回“已中断”，不能当作所有后台进程均已停止的证明。
 
 ### 3.3 对照两个实现，哪些工作留在工具内部
 
 | 接口约定 | read 的实现            | bash 的实现                    |
 | -------- | ---------------------- | ------------------------------ |
 | 描述参数 | 文件路径，可选的行范围 | 命令，可选的超时时间           |
-| 执行操作 | 读取文件，整理正文     | 启动进程，收集输出与退出状态   |
-| 响应取消 | 把信号传给文件读取 API | 监听信号，向子进程发送终止信号 |
-| 返回结果 | 文件内容或读取错误     | 命令输出、退出状态或运行错误   |
+| 执行操作 | 读取文件，整理文本或处理图片 | 启动进程，收集输出与退出状态   |
+| 响应取消 | 把信号传给文件读取 API | 终止命令进程组，并结束输出等待 |
+| 返回结果 | 文本、图片附件或读取反馈 | 命令输出、退出状态或运行错误   |
 
 两者都通过 `name`、`description`、`parameters` 描述能力，通过 `execute(args, signal)` 执行操作并返回结果。新增工具时，把这几项约定接好，就能复用第 2 节的查找、参数校验和结果包装流程。工具内部仍要负责实际操作、资源清理和具体错误原因。
 
@@ -571,25 +627,45 @@ if (!Value.Check(tool.parameters, record)) {
 
 ### 4.3 工具被取消或超时：实际操作是否停止
 
-如果测试迟迟没有结束，用户可能取消，也可能由工具在达到超时时间后停止。第 3.2 节已经展示 `bash` 如何响应用户中断；下面补上同一个 `execute` 方法里的超时处理。`timeoutSec` 来自工具参数，未设置时不创建超时计时器：
+如果测试迟迟没有结束，用户可能取消，也可能由工具在达到超时时间后停止。这里需要分别看：工具如何停止实际操作，以及循环愿意等待工具多久。
+
+**Bash 的命令超时。** 第 3.2 节已经展示 `stop()` 和取消监听；同一个 `execute` 方法里的超时处理也会调用 `stop()`。`timeoutSec` 来自工具参数，未设置时不创建超时计时器：
 
 ```ts
 // 文件：src/core/tools/bash.ts
 // 所在函数：createBashTool 返回的工具对象的 execute 方法
 // 位于 new Promise 的回调内；省略进程创建和后续收尾代码。
 const timer =
-  timeoutSec !== undefined
-    ? setTimeout(() => {
-        timedOut = true; // close 事件中据此返回超时原因和已有输出。
-        child.kill("SIGTERM");
-        setTimeout(() => child.kill("SIGKILL"), KILL_GRACE_MS).unref();
-      }, timeoutSec * 1000)
-    : undefined;
+  timeoutSec === undefined
+    ? undefined
+    : setTimeout(() => {
+        timedOut = true;
+        stop();
+      }, timeoutSec * 1000);
 ```
 
-到期后，这段代码会向子进程发送终止信号，而不只是停止等待 Promise。后续 `close` 处理会返回超时原因和已经收集的输出，`finish` 则清理计时器与中断监听器。和第 3.2 节的取消处理一样，这里终止的是直接启动的子进程，不能据此保证所有后代进程都已停止。
+到期后，这段代码尝试终止命令进程组。随后进程等待结束，`settle()` 清理计时器与监听器，返回超时原因和已有输出。这个计时器不会调用整次运行的 `abort()`：命令超时会成为一条工具错误结果，Agent 仍可继续请求模型决定下一步。
 
-当前 Ink 的通用工具接口没有统一的超时字段，`bash` 在内部处理自己的超时。无论取消或超时由谁触发，都需要让实际操作响应停止要求，并在结果中说明中断原因；仅让界面停止显示，后台操作仍可能继续。
+**取消后，工具一直不返回怎么办？** 工具接口提供了 `signal`，但不能强迫每个工具都响应它。比如扩展工具已经开始等待某个外部操作，却忽略了取消通知；即使循环不再安排后续调用，也可能一直停在当前工具的 `await` 上。
+
+当前 [`loop.ts`](https://github.com/FishInSalt/ink/blob/main/src/core/loop.ts) 为每批工具创建 `createGraceRegistry`，串行和并发执行都通过它等待结果。第 2 节的串行调用最终执行的是：
+
+```ts
+// 文件：src/core/loop.ts
+// 所在函数：executeToolCall，参数检查和执行前回调之后。
+const result = await grace.race(prepared.run(signal), name);
+return { ...result, toolCallId: id };
+```
+
+运行正常时，它照常等待工具完成；只有收到取消通知、且有待完成的工具执行时，才启动 **10 秒宽限计时**。同一批执行共享这个截止点，不会为每个工具依次等待 10 秒。到期仍未返回的调用得到合成的错误结果，明确说明“已放弃结果，底层进程可能仍在运行”。迟到的真实结果会被丢弃，避免再次写入历史。
+
+例如，两个并发工具都在执行时用户取消：A 在 1 秒后返回中断结果，B 一直不响应。循环会保留 A 的结果，在宽限计时到期后为 B 生成错误结果，并为尚未执行的调用补上中断说明。结果写入历史后，循环以 `aborted` 结束，不再请求下一次模型回复。
+
+这里有三个边界：
+
+- **放弃等待不会杀死操作。** `grace.race` 只让循环取得一个可用于收尾的结果；实际停止仍由工具负责。
+- **10 秒不是正常执行的超时。** 没有取消通知时，慢工具不会因这个计时而被中断。`bash.timeout` 是另一套工具内部的限制。
+- **计时只覆盖工具执行。** 执行前的 `onToolCall` 回调和模型请求不在这个范围内，不能据此承诺“任何阶段的取消都会在 10 秒内结束”。
 
 即使操作已经停止，之前写入的内容也不会自动恢复。**取消或超时都不等于回滚**，再次执行前仍要确认已有修改。
 

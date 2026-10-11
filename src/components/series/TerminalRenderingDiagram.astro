@@ -8,17 +8,16 @@ const regions = [
   {
     name: "对话区",
     content:
-      "用户：修复求和函数，并运行测试。\n思考：先检查函数与测试……\n回答：我先查看求和函数。\n● read README.md ✓\n▸ 文件内容",
+      "用户：修复求和函数，并运行测试。\n回答：我把检查交给 reviewer。\n● read src/sum.ts ✓\n  ⎿ 文件内容……\n● task reviewer 8s\n└─ pending #1.1 reviewer\n检查修改\n2 tool starts · last: read src/sum.ts",
     description:
-      "保存用户输入、模型回答、可见思考和已完成的工具结果。新内容追加，结果可以展开。",
+      "保存用户输入、模型回答与可见思考；调用块中显示排队、耗时和子代理进展，结果紧跟原调用，内容可以展开。",
     kind: "conversation",
   },
   {
-    name: "活动区",
-    content:
-      "⠙ bash npm test · 3s\n⠹ reviewer · 检查修改 · 2 次工具调用 · read · 8s",
+    name: "独立工作提示区",
+    content: "（此时没有独立工作提示）",
     description:
-      "显示运行中的工具、子代理及耗时；等待时显示工作提示，结束后移除对应活动行。",
+      "按运行状态显示 working… 或 compacting context… 等提示。工具和具有关联 task 的子代理进展显示在上方调用块中。",
     kind: "activity",
   },
   {
@@ -140,8 +139,8 @@ const regions = [
         <div class="paths">
           <section>
             <>
-              <p class="card-title">文字与完成结果</p>
-              <p>运行事件 → Renderer</p>
+              <p class="card-title">文字、工具调用与结果</p>
+              <p>运行事件 → Renderer／toolSink</p>
               <p class="state">
                 TranscriptSink
                 <>
@@ -156,7 +155,7 @@ const regions = [
               <p class="card-title">当前活动与用户操作</p>
               <p>工具／子代理事件、定时器、键盘输入</p>
               <p class="state">
-                活动区、编辑器等组件
+                调用块、工作提示、编辑器等组件
                 <>
                   <br />
                   <span>保存各自的显示状态</span>

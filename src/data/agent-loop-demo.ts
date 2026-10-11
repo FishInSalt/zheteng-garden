@@ -25,13 +25,13 @@ export const loopCode = [
   "  if (assistant === null) return aborted;",
   "  history.push(assistant); turns++;",
   "  const toolCalls = assistant.blocks.filter(...);",
-  "  if (toolCalls.length === 0) return completed;",
+  "  if (toolCalls.length === 0) return completed; // 假设无追加输入",
   "  if (turns >= maxIterations) {",
   "    // 补齐未执行结果，并写入 history",
   "    return max_iterations;",
   "  }",
   "  const results = [];",
-  "  await executeToolBatch(..., results);",
+  "  await executeToolBatch(..., results); // 假设回复未被输出上限截断",
   "  fillMissingToolResults(toolCalls, results, ...);",
   '  history.push({ role: "toolResult", results });',
   "}",
@@ -94,7 +94,7 @@ const answer: LoopStep = {
 const done: LoopStep = {
   title: "本次运行结束",
   detail:
-    "没有工具请求，返回 completed。这个状态说明本次运行正常结束；答案是否正确还需要验证。",
+    "没有工具请求，也没有追加输入，返回 completed。本场景假设回复未被截断；答案是否正确仍需验证。",
   line: 8,
   turns: 2,
   stop: "completed",
@@ -225,7 +225,7 @@ export const loopScenarios: LoopScenario[] = [
         ...read,
         title: "模型一次请求两个工具",
         detail:
-          "一条 assistant 消息请求读取两个文件，turns 只加 1。本场景按顺序执行这两个调用。",
+          "一条 assistant 消息请求读取两个文件，turns 只加 1。本场景假设读取工具串行执行；当前内置 read 允许并发。",
         append: [
           {
             role: "assistant",

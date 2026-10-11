@@ -1,6 +1,7 @@
 ---
 author: 折腾客
 pubDatetime: 2026-09-25T10:06:43Z
+modDatetime: 2026-10-10T13:59:44Z
 title: "Coding Agent 原理与实践 08：权限与信任——怎样控制 Agent 的执行风险"
 featured: false
 draft: false
@@ -177,7 +178,7 @@ for (;;) {
 
 控制这类风险的思路，是在工具执行之前检查操作及其目标，根据规则决定直接放行、请求用户批准，还是拒绝执行。Ink 的 Agent 循环为此提供了执行前钩子 `onToolCall`。开发者可以在扩展中通过 `api.on("tool_call", handler)` 注册检查逻辑；工具执行前，`onToolCall` 会触发这些处理函数，等待检查结果后再决定是否执行工具。具体的扩展接入过程会在第 09 篇介绍。
 
-Ink 参考了 pi 的扩展设计，**把具体的风险判断规则交给扩展实现，默认不启用这类规则。** 仓库附带的 [Guardian 扩展示例](https://github.com/FishInSalt/ink/blob/main/examples/extensions/guardian.mjs) 提供了一个简单实现：检查部分危险命令和文件写入，按规则拒绝操作或请求用户批准。**这个扩展需要安装并成功加载才会生效。**
+Ink 参考了 pi 的扩展设计，**把具体的风险判断规则交给扩展实现，默认不启用这类规则。** 仓库附带的 [Guardian 扩展示例](https://github.com/FishInSalt/ink/blob/main/examples/extensions/guardian.mjs) 读取 `~/.ink/guardian.json`，按其中的 `deny` 和 `ask` 规则检查 `bash`、`write`、`edit` 调用。**扩展需要安装并成功加载，配置中也需要有相应规则，才会阻止或询问这些操作。** 下面的共享配置写入示例，假设用户已配置了对应的 `ask` 规则。
 
 <PermissionBoundaryDiagram variant="call" />
 
@@ -188,7 +189,8 @@ Ink 参考了 pi 的扩展设计，**把具体的风险判断规则交给扩展�
 ```ts
 // 文件：src/core/loop.ts
 // 所在函数：executeToolCall
-// 节选函数体；省略签名与类型。工具查找、参数校验见第 03 篇。
+// 简化节选：省略签名与取消后的等待封装，末尾只展示执行入口。
+// 工具查找、参数校验见第 03 篇。
 const call: ToolCallRef = { id, name, arguments: args };
 const prepared = prepareToolCall(call, toolMap);
 if ("result" in prepared) return prepared.result;
@@ -204,7 +206,7 @@ if (decision?.block) {
   return {
     toolCallId: id,
     toolName: name,
-    content: `Tool "${name}" blocked by an extension: ${decision.reason ?? "no reason given"}`,
+    content: `Tool "${name}" blocked by ${blockSource(decision)}: ${decision.reason ?? "no reason given"}`,
     isError: true,
   };
 }
@@ -251,93 +253,120 @@ return undefined; // 所有检查都没有要求阻止这次调用。
 
 ### 3.2 Guardian 怎样检查一次文件写入？
 
-Guardian 通过 `api.on("tool_call", handler)` 注册检查函数。调用时，`event.name` 是工具名称，`event.args` 是调用参数。下面保留文件写入的检查，对应刚才修改共享配置的场景：
+Guardian 通过 `api.on("tool_call", handler)` 注册检查函数。调用时，`event.name` 是工具名称，`event.args` 是调用参数。它把 Bash 命令文本或写入目标的绝对路径交给规则匹配器，依次检查：
+
+1. **先匹配 `deny`**：命中就直接拒绝，不进入用户询问。
+2. **再匹配 `ask`**：只有没有命中 `deny` 时，才查找需要用户批准的规则。
+3. **都未命中则不阻止**：Guardian 放行，由调用层继续其余检查和执行。
+
+因此，目标位于工作目录之外，并不会自动触发询问；也没有一组不依赖配置的内置保护目录。要保护刚才的共享配置，可以在 `~/.ink/guardian.json` 中写入下面这组规则。**这是为本文场景编写的教学配置，不是 Guardian 的默认配置：**
+
+```json
+{
+  "deny": [
+    {
+      "tool": ["write", "edit"],
+      "regex": "^/work/shared/locked(?:/|$)",
+      "reason": "受保护的共享配置不能由 Agent 修改"
+    }
+  ],
+  "ask": [
+    {
+      "tool": ["write", "edit"],
+      "regex": "^/work/shared(?:/|$)",
+      "reason": "修改共享配置前需要确认"
+    }
+  ],
+  "askTimeoutMs": 600000
+}
+```
+
+这组配置让 `/work/shared/test-config.json` 命中 `ask`；而 `/work/shared/locked/test-config.json` 同时符合两类规则，优先命中 `deny`，不会弹出询问。`askTimeoutMs` 指定等待回答的时长，下一节会说明它的行为。
+
+规则中的 `tool` 指定检查哪些工具，未填写时默认针对 `bash`。`regex` 匹配命令或路径文本；也可以使用 `pattern`，其中 `*` 可以跨越任意字符。`pattern` 是文本匹配，不是对 Shell 命令或文件系统权限的完整解析。
+
+文件写入进入规则匹配前，会先根据调用所在目录解析路径：
 
 ```js
 // 文件：examples/extensions/guardian.mjs
 // 所在位置：default 导出函数注册的 tool_call 回调
-// 节选文件写入分支；省略 Bash 分支及辅助函数定义，不能单独运行。
-api.on("tool_call", async event => {
-  if (
-    (event.name === "write" || event.name === "edit") &&
-    typeof event.args.path === "string"
-  ) {
-    const cwd = callerCwd(event);
-    const floor = floorOf(path.resolve(cwd, event.args.path));
-    if (floor !== undefined) {
-      return { block: true, reason: floorReason(floor) };
-    }
-    if (!insideDir(event.args.path, cwd)) {
-      const approved = await api.confirm(
-        `[guardian] allow writing outside ${cwd}?`,
-        event.args.path,
-        { sessionKey: `guardian:write:${cwd}` }
-      );
-      if (approved) return undefined;
-      return {
-        block: true,
-        reason: `writing outside the project directory (${cwd}) — keep changes inside it, or hand files beyond the project to the human`,
-      };
-    }
-  }
-});
+// 节选：已确认工具是 write/edit，text 在外层声明。
+const target = typeof event.args?.path === "string" ? event.args.path : undefined;
+const base = typeof event.cwd === "string" ? event.cwd : api.cwd;
+text = target === undefined ? undefined : path.resolve(base, target);
+
+// ……省略审计信息准备、try 包装与工具名称检查；此处 text 已有效。
+const hit = match(tool, text);
+if (hit === undefined) return undefined;
+if (hit.kind === "deny") {
+  // ……省略审计记录。
+  return {
+    block: true,
+    reason: hit.rule.reason === ""
+      ? `blocked by guardian rule: ${hit.rule.source}`
+      : hit.rule.reason,
+  };
+}
+// 后续处理 ask：等待确认，再决定是否阻止调用。
 ```
 
-检查按以下顺序进行：
+`event.cwd` 让相对路径按本次工具调用的工作目录解释；没有这个字段时，才退回扩展的 `api.cwd`。`match` 内部先遍历 `deny`，再遍历 `ask`，每类取第一条命中的规则。用户批准 ask 后，`return undefined` 仍只表示 **Guardian 不阻止这次调用**，不代表跳过其他扩展的检查。
 
-1. `callerCwd(event)` 取得本次调用的工作目录，`path.resolve` 将目标路径转换为绝对路径。
-2. `floorOf` 判断目标是否位于预设的保护目录中，例如 `/etc`、`~/.ssh`。命中就返回 `{ block: true, reason: ... }`，直接拒绝。
-3. 未命中保护目录时，`insideDir` 判断目标是否在工作目录内；目标在目录外，才通过 `api.confirm` 等待用户批准。
-
-用户批准后，`return undefined` 表示 **Guardian 不阻止这次调用**；目标在工作目录内且未命中保护目录时，这个分支也不阻止调用。目标文件的写入仍由调用层在其余检查完成后交给工具执行。
-
-示例中的 `/work/shared/test-config.json` 不属于预设保护目录，但在 `/work/app` 之外，因此会进入询问分支。`sessionKey` 用来标识可以复用的批准，下一小节会解释它的作用。Guardian 还会检查部分 Bash 命令，例如递归强制删除、强制推送，以及把下载内容直接交给 Shell 执行。
+仓库提供了 [Guardian 配置模板](https://github.com/FishInSalt/ink/blob/main/examples/extensions/guardian.template.json)，但它不会自动成为生效配置。配置文件不存在时，Guardian 使用零条规则；文件格式错误时，保留当前进程内最后一次成功加载的规则，并显示配置错误。如果此前从未成功加载，仍是零条规则。修改配置后可以用 `/guardian reload` 重载，用 `/guardian status` 查看规则数量与加载状态。
 
 ### 3.3 用户的回答怎样变成执行决定？
 
-刚才的 `api.confirm` 将审批问题交给终端交互层。Ink 的 TUI 提供三个选项：
+命中 `ask` 后，Guardian 通过 `api.confirm` 将审批问题交给终端交互层。这条正常询问路径提供 `sessionKey`，因此 Ink 的 TUI 显示三个选项：
 
 - **允许本次**：本次检查通过，不保存批准记录。
-- **本次会话不再询问**：本次检查通过，并记住扩展提供的 `sessionKey`；后续相同键的询问可以复用批准。
+- **本次会话不再询问**：本次检查通过，并记住 `guardian:session`；选项说明会指出，它覆盖本次会话中的全部 Guardian `ask` 提示。
 - **拒绝**：本次检查不通过。取消选择也按拒绝处理。
 
-如果没有可复用的批准，就需要等待用户选择。下面是 [`repl.ts`](https://github.com/FishInSalt/ink/blob/main/src/repl/repl.ts) 中 `TtyConfirm.handler` 的核心处理：
+返回结果现在有三种：`true` 表示批准，`false` 表示未批准，字符串 `"timeout"` 表示询问超时。**只有严格等于 `true` 才能放行。** 如果简单写成 `if (outcome)`，非空字符串 `"timeout"` 也会被误当作批准。
 
-```ts
-// 文件：src/repl/repl.ts
-// 所在函数：TtyConfirm.handler
-// 节选会话内记忆与 TUI 选择分支；省略提示输出、无 TUI 时的处理。
-const sessionKey = options?.sessionKey;
-if (sessionKey !== undefined && this.sessionAllowed.has(sessionKey)) {
-  return true; // 相同的 sessionKey 已获批准，不再询问。
-}
-const select = this.select;
-if (select !== null) {
-  // 0：允许本次；1：本次会话不再询问；2：拒绝。
-  const choice = await select({ title: message, items: CONFIRM_ITEMS });
-  if (choice === null) return false; // 取消选择也不批准。
-  if (choice === 1 && sessionKey !== undefined) {
-    this.sessionAllowed.add(sessionKey); // 只有选项 1 会记住批准。
-  }
-  return choice !== 2; // 选项 0、1 返回 true；选项 2 返回 false。
-}
+下面节选 Guardian 的文件写入询问路径，`text` 是已经解析好的绝对路径，`hit` 是命中的 ask 规则：
+
+```js
+// 文件：examples/extensions/guardian.mjs
+// 所在位置：tool_call 回调的 ask 分支。
+// 节选 write/edit 路径；省略 Bash 预览、审计记录与内部异常的确认分支。
+const detail = hit.rule.reason === ""
+  ? `guardian ask rule: ${hit.rule.source}`
+  : hit.rule.reason;
+const options = {
+  sessionKey: "guardian:session",
+  rememberLabel: "all guardian ask prompts this session",
+  ...(askTimeoutMs !== undefined ? { timeoutMs: askTimeoutMs } : {}),
+};
+const outcome = await api.confirm(`allow this ${tool}?`, `${text}\n${detail}`, options);
+// ……省略审计记录，记录 approved、denied 或 timeout。
+if (outcome === true) return undefined;
+const declined = outcome === "timeout"
+  ? askTimeoutMs === undefined
+    ? "the confirmation timed out — the call was not approved"
+    : `the confirmation timed out after ${humanDuration(askTimeoutMs)} — the call was not approved`
+  : "the user declined this call";
+return {
+  block: true,
+  reason: hit.rule.reason === "" ? declined : `${hit.rule.reason} — ${declined}`,
+};
 ```
 
-返回值会交回 Guardian：`true` 表示用户已批准，Guardian 不阻止调用；`false` 则让 Guardian 返回 `{ block: true, reason: ... }`。无法交互确认且没有可复用批准时，确认接口也返回 `false`。
+“本次会话不再询问”究竟覆盖什么，由 `sessionKey` 决定。Guardian 的正常 ask 路径统一使用 `guardian:session`，因此批准会被后续命中 ask 的 Bash 命令和文件写入复用，**不限于某个文件、工作目录或某条规则**。`deny` 仍然优先执行，不会被这份批准绕过。内部异常触发的兜底询问不携带这个键，也不会复用正常 ask 的会话批准。
 
-“本次会话不再询问”究竟覆盖什么，由 `sessionKey` 决定。刚才的写入规则使用 `guardian:write:/work/app`。选择这个选项后，记住的是**从同一工作目录发起的项目外写入审批**，不限于这一个共享配置文件。预设保护目录仍会先被拒绝，因为那段检查发生在 `api.confirm` 之前。
+这份记忆由 [`TtyConfirm.handler`](https://github.com/FishInSalt/ink/blob/main/src/repl/repl.ts) 的 `sessionAllowed` 集合保存。它只保存在当前进程中，不会写入会话文件，重启 Ink 后不会恢复；界面中的“本次会话”不能理解成对某一个持久化会话文件的授权。
 
-`sessionAllowed` 只保存在当前进程内，不会写入会话文件，重启 Ink 后也不会恢复这些批准。
+前面的 `askTimeoutMs: 600000` 表示等待 10 分钟。TUI 从问题实际显示出来时开始计时，问题若排在其他弹窗后面，排队时间不计入。超时返回 `"timeout"`，既不批准操作，也不记录会话批准；拒绝原因会明确说明是等待超时。未配置该字段时没有这条等待期限。当前超时能力只用于支持选择框的 TUI；旧版文本输入界面不执行这个期限，无法交互且没有可复用批准时则直接返回 `false`。
 
-用户拒绝后，Agent 循环把拒绝原因作为工具结果写入历史，让模型在下一次调用时知道这次工具操作没有执行。
+无论用户拒绝还是询问超时，Guardian 都会返回 `{ block: true, reason: ... }`。Agent 循环把原因作为工具结果写入历史，让模型在下一次调用时知道这次操作没有执行。
 
 ### 3.4 当前方案还存在哪些局限？
 
 这套机制能在工具执行前阻止命中规则的调用，但目前还有几处明显的局限：
 
-- **检查依赖扩展成功加载。** Guardian 是可选扩展；没有启用或加载失败时，它的规则不会生效。
-- **审批范围比较粗。** 选择“本次会话不再询问”后，同一工作目录发起的其他项目外写入，也可能复用这份批准，而不再逐个询问。
-- **规则只能识别部分风险。** 路径判断使用 `path.resolve` 和目录前缀比较，命令判断主要依靠文本规则，不能保证覆盖符号链接或脚本内部的行为。
+- **检查依赖扩展和配置。** Guardian 是可选扩展；没有加载或没有规则时，不会提供相应拦截。配置错误会保留上一次有效规则，不会自动切换为全部拒绝。
+- **审批范围比较粗。** 选择“本次会话不再询问”会覆盖所有正常 Guardian ask 提示，后续不同命令或路径都可能复用批准；deny 规则仍生效。
+- **规则只能识别部分风险。** 路径经 `path.resolve` 处理后仍是字符串匹配，Bash 也按命令文本匹配；它不会完整解析 Shell 行为，也不能保证识别符号链接或脚本内部的访问。
 - **通过检查后，没有进一步限制实际访问。** 工具使用当前用户权限运行，Ink 尚未提供操作系统级沙箱。一个获准运行的脚本，仍可能访问任务之外的文件或网络。
 
 因此，执行前检查只是风险控制的一部分。要限制操作真正造成的影响，还需要约束它运行时能够访问的资源。

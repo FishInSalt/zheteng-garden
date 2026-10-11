@@ -23,7 +23,7 @@ const first = loopScenarios[0].steps[0];
     </div>
   </div>
   <div class="step-state" role="status" aria-live="polite" aria-atomic="true">
-    <span data-progress>步骤 1 / 8 · 模型回复 0 次 · 上限 4 次</span>
+    <span data-progress>步骤 1 / 8 · 模型回复 0 次 · 示例阈值 4 次</span>
     <strong data-title>{first.title}</strong>
     <p data-detail>{first.detail}</p>
   </div>
@@ -71,7 +71,7 @@ const first = loopScenarios[0].steps[0];
   </noscript>
   <footer>
     演示按主要动作推进，跳过部分条件判断。省略号表示省略的参数或实现；返回值只展示停止原因。模型回复次数对应
-    turns，只计完整回复；演示不模拟文本片段的逐段显示。
+    turns，只计完整接收的回复。演示假设无追加输入、回复未被输出上限截断；轮数阈值是教学配置，不模拟文本片段的逐段显示。
   </footer>
 </agent-loop-demo>
 
@@ -95,7 +95,7 @@ const first = loopScenarios[0].steps[0];
       const render = () => {
         const step = scenario.steps[index];
         this.querySelector("[data-progress]")!.textContent =
-          `步骤 ${index + 1} / ${scenario.steps.length} · 模型回复 ${step.turns} 次 · 上限 ${scenario.limit} 次`;
+          `步骤 ${index + 1} / ${scenario.steps.length} · 模型回复 ${step.turns} 次 · 示例阈值 ${scenario.limit} 次`;
         this.querySelector("[data-title]")!.textContent = step.stop
           ? `${step.title} · ${step.stop}`
           : step.title;
