@@ -1,6 +1,7 @@
 ---
 author: 折腾客
 pubDatetime: 2026-09-23T15:09:58Z
+modDatetime: 2026-10-10T16:36:57Z
 title: "Coding Agent 原理与实践 07：终端界面——回答与状态怎样实时刷新"
 featured: false
 draft: false
@@ -22,8 +23,8 @@ import TerminalActivityDemo from "@/components/series/TerminalActivityDemo.astro
 
 - **文字回复**：模型返回的回答逐段显示，代码块按相应格式呈现。
 - **思考文本**：模型服务提供思考内容时，用较暗、斜体的样式展示，与回答区分开。
-- **工具状态与结果**：显示正在运行的工具、参数摘要和耗时；结束后移除运行提示，在对话记录中留下完成状态和结果。结果可以折叠、展开，文件修改也可以用颜色标出新增和删除的内容。
-- **子代理状态**：任务交给子代理时，显示它的任务摘要、最近调用的工具、工具调用次数和耗时。
+- **工具状态与结果**：在对话区的调用块中显示参数、排队提示或运行耗时；结束后改为完成状态，结果紧跟对应调用。调用和结果可以折叠、展开，文件修改也可以用颜色标出新增和删除的内容。
+- **子代理状态**：在对应的 `task` 调用块中显示任务摘要、最近启动的工具、工具启动次数和耗时。
 - **工作状态**：等待符号持续转动，工具和子代理的运行时间不断增加。
 - **输入区与底部信息**：用户可以继续编辑文字，排队消息、模型和用量等信息随状态更新。
 
@@ -144,87 +145,110 @@ this.options.transcript.onUpdate = this.boundOnUpdate;
 
 思考内容也沿着这条路径显示：`thinking_delta` 使用独立的文字缓冲，加上较暗、斜体样式后，同样通过 `write` 加入显示记录并触发刷新。隐藏思考内容时，显示会改为简短标签。这里显示的是模型服务实际返回的思考内容；服务没有提供的内容，界面无法自行取得。
 
-活动区中的 `thinking…` 则只是等待或工作提示。它与思考正文没有直接的对应关系，不能凭这个标签判断模型内部正在做什么。
+独立工作提示区中的 `working…` 则只是等待或工作提示。它与思考正文没有直接的对应关系，不能凭这个标签判断模型内部正在做什么。
 
 ### 2.2 工具、子代理和工作状态怎样刷新？
 
-工具开始运行时，活动区增加一行；运行期间，这一行的耗时持续变化；工具结束后，再移除这一行。下面以 `bash` 运行测试为例，看这些变化怎样实现。
+当前默认 TUI 把工具状态放在对话区的对应调用块中：排队时显示 `queued`，运行时更新耗时，结束后留下完成标记和结果。子代理的进展也放在对应的 `task` 调用块里。独立工作提示区主要用于 `working…`、上下文压缩等提示。
 
-**工具开始与结束：更新正在运行的调用**
+下面以一次允许并发的 `read` 调用为例，假设它需要等待执行位置，再开始读取文件。演示只展示这一调用，其他占用执行位置的调用省略。
+
+**工具从排队到完成：更新同一个调用块**
 
 <TerminalActivityDemo mode="tool" />
 
 同一种工具可能被调用多次，因此需要按调用 ID 区分记录。例如，两个 `read` 同时运行时，仅凭工具名就无法判断该移除哪一行。
 
-Ink 在 `activityTools` 中按工具调用 ID 保存正在运行的工具，收到结束事件后，再按同一个 ID 删除。下面保留普通工具的处理路径：
+Ink 在 `activityTools` 中按调用 ID 保存尚未结束的普通工具，包括排队中的调用。`tool_start` 登记调用；对于允许并发的工具，先设置 `queued`，等 `tool_running` 到达后才重置开始时间、清除排队标记。`tool_settled` 或 `tool_end` 则移除活动记录。各类事件的时序见[第 06 篇 2.1 节](/posts/coding-agent-06-interaction/#21-模型回复和工具状态怎样传回界面)。
 
 ```ts
 // 文件：src/repl/repl.ts
 // 所在函数：ReplMachine.trackActivity
-// 节选普通顶层工具的两个分支，省略子代理和 task 工具分支。
+// 节选普通顶层工具路径，省略 task、子代理和 label 的准备过程。
 if (event.type === "tool_start") {
+  // label 来自已准备好的工具展示信息；此处省略其构造。
+  const queued = this.runner.getTool(event.name)?.concurrencySafe === true
+    ? true
+    : undefined;
   this.activityTools.set(event.toolCallId, {
     id: event.toolCallId,
     name: event.name,
-    label: summarizeArgs(event.name, event.args),
+    label,
     startedAtMs: Date.now(),
+    ...(queued !== undefined ? { queued } : {}),
   });
   this.pushActivity();
-  return;
-}
-if (event.type === "tool_end") {
+} else if (event.type === "tool_running") {
+  const toolRow = this.activityTools.get(event.toolCallId);
+  if (toolRow?.queued === true) {
+    this.activityTools.set(event.toolCallId, {
+      ...toolRow,
+      startedAtMs: Date.now(),
+      queued: undefined,
+    });
+    this.pushActivity();
+  }
+} else if (event.type === "tool_end" || event.type === "tool_settled") {
   this.activityTools.delete(event.result.toolCallId);
   this.pushActivity();
 }
 ```
 
-`pushActivity` 把当前正在运行的工具、子代理及工作状态整理成一份活动快照，交给 `TuiShell.setActivity`。后者保存这份状态，并调用 `renderActivity` 生成活动区的显示内容。
+`pushActivity` 把工具、子代理及工作状态整理成一份活动快照，交给 `TuiShell.setActivity`。虽然函数仍叫 `renderActivity`，当前实现会把这份快照转成对话区调用块中的临时显示，而不是为每个工具在底部再建立一行。
 
-`renderActivity` 先清空活动区的旧组件，再为每个正在运行的工具创建文字组件。下面是生成工具行的部分；其中 `frame` 是当前等待符号，`elapsed` 根据开始时间计算耗时：
+对于普通工具，它通过两个通道更新调用块：`setCallLiveRows` 放置排队等临时状态行，`setCallSuffix` 更新调用信息末尾的耗时。下面节选从快照生成这两类内容的代码：
 
 ```ts
 // 文件：src/repl/shell.ts
 // 所在函数：TuiShell.renderActivity
-// 节选工具行的生成；省略空闲判断、frame/elapsed 定义、工作提示及子代理行。
-this.activityContainer.clear();
+// 节选普通工具路径；省略 Map 初始化、runningText 定义和子代理处理。
 for (const tool of this.activity.tools) {
-  const label = tool.label === "" ? "" : ` ${tool.label}`;
-  this.activityContainer.addChild(
-    new Text(
-      dim(`${frame} ${tool.name}${label}${elapsed(tool.startedAtMs)}`, true),
-      0,
-      0
-    )
-  );
+  if (tool.queued === true) nextLiveRows.set(tool.id, ["└─ queued"]);
 }
-this.tui?.requestRender();
+if (this.selector === null) {
+  for (const tool of this.activity.tools) {
+    if (tool.queued !== true) {
+      nextSuffixes.set(tool.id, runningText(tool.startedAtMs));
+    }
+  }
+}
+// 后续按调用 ID 对比新旧内容，只把变化交给 TranscriptSink：
+// this.options.transcript.setCallLiveRows(key, rows);
+// this.options.transcript.setCallSuffix(key, text);
+// 已不在快照中的状态则传 null 清除。
 ```
 
-例如，工具名是 `bash`、参数摘要是 `npm test`，运行了 3 秒，这里就会生成类似 `⠙ bash npm test 3s` 的文字。`Text` 保存要显示的文字，`dim` 添加较暗的样式，最后由 `requestRender()` 通知 TUI 刷新。
+`runningText` 根据开始时间生成 `0s`、`1s` 等文字。排队时没有运行计时；收到 `tool_running` 后，耗时从实际取得执行位置时开始计算。`selector` 是当前选择或确认界面：它打开时，普通工具的运行耗时暂不显示，排队提示仍可保留，避免把尚在等待审批的调用画成正在执行。
 
-收到 `tool_end` 后，调用记录被删除。再次生成活动区时，就不再包含它的运行提示。与此同时，`Renderer.toolEnd` 把完成或失败状态写入对话记录，工具结果也保留在那里，供用户回看。
+`TranscriptSink` 根据调用 ID 找到对应的 `ToolBlockFold`，更新临时状态，再通过 `onUpdate` 请求刷新。排队提示和运行耗时只是界面状态，不会写入模型的对话历史。
+
+**调用完成后：清理临时状态，结果跟随原调用**
+
+并发调用取得结果时，`tool_settled` 会立即移除其活动记录，并交给 `toolSink.end` 显示结果；串行调用则在 `tool_end` 时处理。工具展示层更新原调用块的完成标记和耗时，结果块通常插在对应调用块之后。即使 B 比 A 先完成，B 的结果也放在 B 的调用下方，不会堆在全部调用的末尾。稍后有序的 `tool_end` 再次到达时，已结束的记录不会重复添加结果。
+
+这里的完成标记依据工具结果的 `isError` 等显示状态生成，仍需结合输出判断任务是否成功。例如，Bash 正常退出但返回非零退出码时，不能只看一个完成勾就认为测试通过。取消后的收尾也不保证底层操作已经停止，边界见第 06 篇 2.4 节。
 
 **子代理：更新任务摘要和工具活动**
 
 <TerminalActivityDemo mode="agent" />
 
-子代理也通过活动快照显示，但每行的内容不同：
+子代理也通过活动快照更新，但状态显示在对应的 `task` 调用块中：
 
 | 显示内容             | 数据怎样变化                       |
 | -------------------- | ---------------------------------- |
-| 子代理名称、任务摘要 | 开始调用 `task` 工具时建立记录     |
+| 子代理名称、任务摘要 | `task` 的 `tool_start` 建立记录，尚未取得执行位置时标为排队 |
 | 最近调用的工具       | 收到该子代理的 `tool_start` 时更新 |
 | 工具调用次数         | 每收到一次子代理工具开始事件就增加 |
-| 已运行时间           | 由界面根据开始时间计算             |
-| 活动行消失           | 对应的顶层 `task` 调用结束时移除   |
+| 已运行时间           | `tool_running` 后开始计时，显示在调用信息末尾 |
+| 临时进展消失         | 顶层 `task` 取得结果时移除进展行，调用和结果保留 |
 
-子代理的文字不会原样混入主 Agent 的回答。交互层根据事件附带的来源信息找到对应子代理，更新它最近调用的工具和调用次数，再用这些数据生成活动行。
+子代理的文字不会原样混入主 Agent 的回答。交互层根据事件附带的来源信息找到对应子代理，更新最近启动的工具和累计启动次数，再生成 `queued` 或 `pending` 进展行。某一次子工具结束，只更新该子代理的工具状态；整项委派工作是否结束，要看顶层 `task` 的结果。
 
 **等待动画和耗时：由定时器触发更新**
 
 <TerminalActivityDemo mode="timer" />
 
-还有一种变化不需要模型或工具发来事件：耗时要增长，等待符号要转动。`TuiShell` 在非空闲期间启动定时器：
+还有一种变化不需要模型或工具发来事件：调用块中的耗时要增长，独立工作提示出现时，其中的等待符号也要转动。`TuiShell` 在非空闲期间启动定时器：
 
 ```ts
 // 文件：src/repl/shell.ts
@@ -239,47 +263,46 @@ if (this.activityTimer === null) {
 }
 ```
 
-`SPINNER_FRAMES` 保存 `⠋⠙⠹⠸…` 这样的字符序列。定时器改变下标，`renderActivity` 选择当前字符，重新计算工具和子代理的耗时，再调用 `requestRender()`。于是，即使网络暂时没有返回内容，界面也能变化。这不是进度百分比，也不表示后台一定取得了新进展。
+`SPINNER_FRAMES` 保存 `⠋⠙⠹⠸…` 这样的字符序列。定时器改变下标，`renderActivity` 更新工作提示的等待字符，以及调用块中的工具和子代理耗时，再调用 `requestRender()`。上面的演示只观察 Bash 耗时变化；它运行期间不需要在独立提示区重复画一条工具状态。这不是进度百分比，也不表示后台一定取得了新进展。
 
-整次运行结束、界面进入空闲状态时，还要清除定时器和活动行，避免留下仍在工作的提示。
+整次运行结束、界面进入空闲状态时，还要清除定时器、临时进展行和运行耗时，避免留下仍在工作的提示；已经完成的调用与结果保留在对话区。
 
 ### 2.3 工具结果怎样折叠与展开？
 
-一个工具可能返回几百行日志。Ink 把摘要和正文保存在 `Fold` 组件里，用 `expanded` 记录是否展开。
+一个工具可能返回几百行日志。当前默认 TUI 使用 `ToolBlockFold` 展示工具调用和结果，用 `expanded` 记录是否展开。调用块可以显示参数详情，结果块可以显示日志、文件内容或差异；不再只是一个标题加一份字符串正文。
 
-按下 Ctrl+O 后，Ink 会统一切换当前所有结果的展开状态：只要有结果收起，就全部展开；已经全部展开时，就全部收起。随后请求界面刷新：
+按下 Ctrl+O 后，Ink 会统一切换现有折叠组件的展开状态，其中包括工具调用块和结果块：只要有一项收起，就全部展开；已经全部展开时，就全部收起。随后请求界面刷新：
 
 ```ts
 // 文件：src/repl/shell.ts
 // 所在函数：TuiShell.start 中注册的输入监听回调
 // 节选 Ctrl+O 分支，省略其他按键处理。
 if (matchesKey(data, "ctrl+o")) {
-  if (this.folds.length === 0) return undefined;
-  const expand = this.folds.some(f => !f.isExpanded());
-  for (const fold of this.folds) fold.setExpanded(expand);
+  const folds = [...this.folds, ...this.options.transcript.toolFolds];
+  if (folds.length === 0) return undefined;
+  const expand = folds.some(f => !f.isExpanded());
+  for (const fold of folds) fold.setExpanded(expand);
   this.tui?.requestRender();
   return { consume: true };
 }
 ```
 
-`setExpanded` 修改每个折叠组件的 `expanded` 状态，`consume: true` 表示这个按键已经处理。刷新时，`Fold.render` 根据新状态决定返回哪些内容：
+`setExpanded` 修改各组件的 `expanded` 状态，`consume: true` 表示这个按键已经处理。刷新时，`ToolBlockFold.render(width)` 根据展开状态和终端列宽生成显示行。源码给正文设置了显示预算：
 
 ```ts
-// 文件：src/repl/components/fold.ts
-// 所在函数：Fold.render
-// 节选行数变化的逻辑；省略 head 的箭头、颜色生成。
-const w = Math.max(1, width);
-// 此处省略根据 expanded 和 error 生成 head 的代码。
-const rendered = [truncateToWidth(head, w)];
-if (this.expanded) {
-  for (const line of this.body) rendered.push(truncateToWidth(line, w));
-}
-return rendered;
+// 文件：src/repl/components/tool-block.ts
+// 所在函数：ToolBlockFold.render
+// 节选正文显示预算；省略参数排版、换行、元信息和截断提示。
+const limit = this.expanded
+  ? 1000
+  : block.kind === "diff" && !semantic
+    ? 8
+    : 3;
 ```
 
-这里的 `render(width)` 接收可用列宽，返回一个字符串数组，每项代表一行显示内容。收起时只有一行；展开后，数组会多出正文行。
+这里限制的是相应正文的显示预算，不是整个调用块的总行数。收起时通常仍有摘要或少量预览；展开时显示更多参数、原始输出或差异，但也有显示上限和省略提示。工具在更早阶段已经截断、没有交给显示层的内容，不能靠展开按钮找回来。
 
-Ink 把折叠组件放在对话记录中对应工具的下方。因此，展开或收起会改变这部分内容占用的行数，后续内容的位置由 TUI 重新安排，具体见第三节。这个操作只改变显示，不会重新执行工具，也不会修改发给模型的上下文。
+这些组件都位于对话记录中，结果通常紧跟对应调用。因此，展开或收起会改变这部分内容占用的行数，后续内容的位置由 TUI 重新安排，具体见第三节。这个操作只改变显示，不会重新执行工具，也不会修改发给模型的上下文。
 
 ### 2.4 输入区、排队提示和状态栏怎样更新？
 
@@ -311,7 +334,7 @@ setFooter(text: string): void {
 
 ## 3. pi-tui 怎样把显示内容更新到终端
 
-假设工具还在运行，耗时从 2 秒增加到 3 秒，用户正在输入“请保持函数接口不变”。Ink 已经更新了活动区的数据，也调用了 `requestRender()`。接下来，屏幕上的工具状态怎样改变，输入内容和光标又怎样保留下来？
+假设工具还在运行，耗时从 2 秒增加到 3 秒，用户正在输入“请保持函数接口不变”。Ink 已经更新了调用块的显示状态，也调用了 `requestRender()`。接下来，屏幕上的工具状态怎样改变，输入内容和光标又怎样保留下来？
 
 下面沿着这次刷新往下看。涉及库内部的代码按 Ink 使用的 **pi-tui 0.82.0** 核对，与 Ink 自己的显示逻辑分开标明。
 

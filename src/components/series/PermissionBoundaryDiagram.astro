@@ -78,8 +78,8 @@ const titleId = `permission-${variant}-title`;
             ↓
           </p>
           <div class="node">
-            <strong>Guardian：检查目标位置</strong>
-            <span>本例命中“工作目录外写入”，等待用户批准</span>
+            <strong>Guardian：匹配配置规则</strong>
+            <span>本例未命中 deny，命中共享目录的 ask 规则</span>
           </div>
         </div>
         <div class="branches">
@@ -92,14 +92,14 @@ const titleId = `permission-${variant}-title`;
           </div>
           <div class="node">
             <>
-              <span class="route">↓ 用户拒绝或取消</span>
+              <span class="route">↓ 拒绝、取消或超时</span>
               <strong>不执行 write</strong>
               <span>把拒绝原因作为工具结果交回循环</span>
             </>
           </div>
         </div>
         <figcaption>
-          以仅加载 Guardian 检查的情况为例。嵌套表示调用关系，Guardian
+          本例假设已配置共享目录的 ask 规则，且仅加载 Guardian 检查。嵌套表示调用关系，Guardian
           是扩展提供的检查逻辑，并非 onToolCall 的内置规则。
           其他调用可能直接放行或拒绝，不一定进入询问。
         </figcaption>

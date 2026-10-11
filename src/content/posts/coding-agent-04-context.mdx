@@ -1,7 +1,7 @@
 ---
 author: 折腾客
 pubDatetime: 2026-09-18T12:35:28Z
-modDatetime: 2026-09-19T15:54:45Z
+modDatetime: 2026-10-10T16:18:53Z
 title: "Coding Agent 原理与实践 04：上下文管理：信息组织与历史压缩"
 featured: false
 draft: false
@@ -103,15 +103,94 @@ if (!this.options.noContextFiles) {
 
 当前主流的 Coding Agent 通常会结合多种手段管理上下文。例如，Claude Code 按需加载工具说明，并让子代理在独立上下文中工作，减少主对话积累的内容；历史接近上限时，先清理较早的工具输出，必要时再总结对话。[Claude Code 官方说明](https://code.claude.com/docs/en/how-claude-code-works#when-context-fills-up) Gemini CLI 也支持用摘要替换对话历史，减少后续调用占用的 Token。[Gemini CLI 官方说明](https://geminicli.com/docs/reference/commands/#compress) 这些做法的共同目标，是用更少的内容保留任务进展和关键依据，让模型能够继续工作。压缩结果不一定是文字摘要，例如 OpenAI 的压缩接口会返回模型可继续使用的非明文压缩内容。[OpenAI 官方说明](https://developers.openai.com/api/docs/guides/compaction)
 
-这些方案既会控制进入上下文的信息量，也会整理已经积累的历史。对于不断增长的历史，一种常见处理方式是**上下文压缩**：用更少的内容保留继续任务所需的信息。下面看看 Ink 怎样压缩历史、什么时候触发，以及压缩后怎样继续调用模型。
+这些方案既会控制进入上下文的信息量，也会整理已经积累的历史。对于不断增长的历史，一种常见处理方式是**上下文压缩**：用更少的内容保留继续任务所需的信息。下面按一次压缩的执行顺序，先看 Ink 什么时候触发压缩，再看怎样生成或更新摘要，最后看压缩后怎样继续调用模型。
+
+**什么时候触发压缩**
+
+需要先估算当前上下文占用了多少 Token，再判断是否接近预先设定的阈值。历史不能一直增长到窗口上限，因为后续回复和压缩时的摘要生成也需要空间。Ink 在 [`compaction.ts`](https://github.com/FishInSalt/ink/blob/main/src/core/compaction.ts) 中用下面的条件判断是否触发压缩：
+
+```ts
+// 文件：src/core/compaction.ts
+// 省略参数类型。
+export function shouldCompact(contextTokens, settings) {
+  return contextTokens > (
+    settings.triggerTokens ?? settings.contextWindow - settings.reserveTokens
+  );
+}
+```
+
+`contextWindow` 是所选模型的窗口配置，`triggerTokens` 是自动压缩阈值。没有显式阈值时，才使用 `contextWindow - reserveTokens`。当前 `reserveTokens` 默认为 32,768；它既参与预留空间的计算，也用于推导摘要请求的输出预算，不等于普通对话每次请求的 `maxTokens`。
+
+实际运行时，[`compactionSettingsFor`](https://github.com/FishInSalt/ink/blob/main/src/provider/compaction-settings.ts) 根据模型窗口设置阈值。对于已知窗口、且窗口大于预留量的模型，取下面两项中较小的一个：
+
+- 窗口的 85%，向下取整。
+- 窗口减去 `reserveTokens`。
+
+这样，大窗口也会按比例提前留下余量。用两个窗口配置举例，预留量均采用当前默认值：
+
+| 窗口配置 | 窗口的 85% | 窗口减去 32,768 | 实际压缩阈值 |
+| --- | --- | --- | --- |
+| 200,000 Token | 170,000 | 167,232 | 167,232 Token |
+| 1,000,000 Token | 850,000 | 967,232 | 850,000 Token |
+
+回到运行测试的场景：若窗口是 200,000 Token，测试前估算占用 160,000 Token，不触发压缩；加入约 20,000 Token 的测试输出后，占用变成 180,000 Token，就会在下一次调用前尝试压缩。这里的判断是严格大于阈值，恰好等于阈值时还不会触发。
+
+还有两个边界情况：不知道模型窗口、只能使用兜底值时，仍按“窗口减去预留量”计算；已知窗口不大于预留量时，则使用至少为 1 的 85% 比例阈值，避免得到零或负数。后者只能确定触发时机，并不保证这么小的窗口能装下摘要请求。
+
+`contextTokens` 由 `estimateContextTokens` 估算：优先参考最近一次可用的模型用量报告，再估算之后新增消息的长度；没有可用报告时，就根据消息内容估算。压缩后，保留消息里可能还带着压缩前的用量报告，这些报告描述的是已经被替换的旧上下文。因此，调用方通过 `estimateFloor` 排除这些旧报告，暂时按新历史估算，直到新的模型回复提供用量。
+
+估算并不等于准确计数。当前 Ink 对未测量的文本采用字符数除以 4 的近似方法，图片使用固定估值；首次估算也没有单独计入系统指令和工具说明。因此，提前触发压缩仍不能保证请求一定放得下。若实际模型请求返回上下文超限错误，调用方还有一次“尝试压缩、成功后重新请求”的恢复机会；压缩失败或重试仍超限时，会给出错误提示。
+
+长度检查放在每次模型调用前。Agent 循环通过 `onBeforeTurn` 留出检查和整理历史的位置；处理完成后，再把当前的 `history` 交给模型。下面节选自 [`loop.ts`](https://github.com/FishInSalt/ink/blob/main/src/core/loop.ts)，省略类型和非主线分支，不能单独运行：
+
+```ts
+// 文件：src/core/loop.ts
+// 所在函数：runAgentLoop
+// 位于循环内；省略前面的中断检查和用户追加消息处理。
+await onBeforeTurn?.(history); // 调用前检查，必要时更新历史。
+
+const assistant = await streamAssistant({
+  provider,
+  request: {
+    system,
+    messages: history,
+    tools,
+    model,
+    maxTokens,
+    thinking,
+    signal,
+  },
+  onEvent,
+  usage,
+});
+// 后续：保存模型回复，执行工具，再把结果加入 history。
+```
+
+调用方通过 `onBeforeTurn` 接入自动压缩。下面节选 `RunnerImpl.runTurnInner` 传给 `runAgentLoop` 的回调，保留自动压缩开关与触发条件：
+
+```ts
+// 文件：src/runner.ts
+// 所在函数：RunnerImpl.runTurnInner
+// 节选 runAgentLoop 的 onBeforeTurn 配置；省略其他配置和错误提示包装。
+onBeforeTurn: session
+  ? async (history) => {
+      if (!this.autoCompact) return;
+      const est = estimateContextTokens(history, this.estimateFloor);
+      if (!shouldCompact(est.tokens, settings)) return;
+      await this.compactAndSplice(provider, settings, model, modelReference);
+    }
+  : undefined,
+```
+
+这条自动压缩路径要求有会话且开启自动压缩。没有触发阈值时，历史保持原样；触发后，才进入 `compactAndSplice`。用户新要求和上一轮工具结果已经加入历史，因此检查针对的是即将用于下一次调用的信息。
 
 **怎样压缩历史**
 
-Ink 采用的是“较早历史生成摘要、近期消息保留原文”的方式。压缩入口 `compactAndSplice` 通过 `compactSession` 调用 `compactHistory`，由后者完成历史切分和摘要生成。
+Ink 采用的是“较早历史生成摘要、近期消息保留原文”的方式。压缩入口 `compactAndSplice` 通过 `compactSession` 调用 `compactHistory`，由后者完成历史切分和摘要生成。如果当前历史已经以一份压缩摘要开头，还会把旧摘要单独取出，要求模型结合这次需要总结的消息更新它。
 
 切分时要保留一段近期消息的原文，因为其中可能包含正在处理的代码和最新错误。
 
-`compactHistory` 先用 `findCutIndex` 决定切分位置，再把历史分成两段：
+`compactHistory` 先用 `findCutIndex` 决定近期原文从哪里开始保留，再确定这次需要总结的消息：
 
 ```ts
 // 文件：src/core/compaction.ts
@@ -119,7 +198,9 @@ Ink 采用的是“较早历史生成摘要、近期消息保留原文”的方�
 // 节选：settings 已准备好，省略前面的用量估算。
 const cut = findCutIndex(args.messages, settings.keepRecentTokens);
 if (cut <= 0) return null; // 没有适合移入摘要的旧消息。
-const toSummarize = args.messages.slice(0, cut);
+// 省略旧摘要的识别代码，下文展开：无旧摘要时 summarizeFrom 为 0，识别到时为 1。
+const toSummarize = args.messages.slice(summarizeFrom, cut);
+if (toSummarize.length === 0) return null;
 const retainedTail = args.messages.slice(cut);
 ```
 
@@ -134,9 +215,9 @@ const retainedTail = args.messages.slice(cut);
 
 如果只保留第二条，就剩下一个失去对应调用的工具结果。切分需要尊重消息关系；这个例子应连同前面的模型回复一起保留。当前实现按消息角色寻找边界，不是在这一步重新判断每条内容的相关性。
 
-切分后，`serializeForSummary` 把旧消息整理成带角色说明的文本，`compactHistory` 再单独调用模型生成摘要。这次调用不提供工具，系统指令要求只输出摘要，不继续执行原任务。
+切分后，`serializeForSummary` 把 `toSummarize` 中的消息整理成带角色说明的文本，`compactHistory` 再单独调用模型生成摘要。这次调用不提供工具，系统指令要求只输出摘要，不继续执行原任务。
 
-摘要要用于后续工作，因此不能只写“读了文件、修改了代码、跑了测试”。它需要交代原任务的要求、已经取得的进展，以及接下来继续处理所需的依据。源码中的 `SUMMARIZATION_PROMPT` 明确规定了这些内容：
+首次压缩时，`summarizeFrom` 为 0，从历史开头取出切分点之前的消息。摘要要用于后续工作，因此不能只写“读了文件、修改了代码、跑了测试”。它需要交代原任务的要求、已经取得的进展，以及接下来继续处理所需的依据。源码中的 `SUMMARIZATION_PROMPT` 明确规定了这些内容：
 
 ```ts
 // 文件：src/core/compaction.ts
@@ -178,73 +259,62 @@ Keep each section concise. Preserve exact file paths, function names, and error 
 
 这些要求只作用于送去总结的旧消息，最新测试结果仍保留在近期消息中。提示词不能保证摘要保留了所有必要信息；需要精确使用的代码和错误信息，仍应保留原文，必要时重新读取。
 
-**什么时候触发压缩**
+**再次压缩时，怎样更新已有摘要**
 
-需要先估算当前上下文占用了多少 Token，再判断剩余空间是否充足。除了输入中的系统指令、工具说明和消息历史，还要为模型生成回复留出空间。Ink 在 [`compaction.ts`](https://github.com/FishInSalt/ink/blob/main/src/core/compaction.ts) 中用下面的条件判断是否触发压缩：
+第一次压缩后，历史变成“摘要 + 近期原文”。任务继续推进，这些内容加上后续对话仍可能再次达到压缩阈值。如果每次都把旧摘要当作普通对话重新概括，原有约束和关键细节可能在反复改写中丢失。因此，当前 Ink 为已有摘要准备了更新路径。
+
+它先检查历史的第一条消息：只有这条消息是带有 `SUMMARY_MARK` 标记、且能分离出摘要正文的文本 `user` 消息，才取出 `previousSummary`，把 `summarizeFrom` 设为 1：
 
 ```ts
 // 文件：src/core/compaction.ts
-// 省略参数类型。
-export function shouldCompact(contextTokens, settings) {
-  return contextTokens > settings.contextWindow - settings.reserveTokens;
+// 所在函数：compactHistory，确定 cut 之后、切出 toSummarize 之前。
+// SUMMARY_MARK 来自 src/core/session/store.ts，用于标记压缩摘要。
+const head = args.messages[0];
+let previousSummary: string | undefined;
+let summarizeFrom = 0;
+if (
+  head !== undefined &&
+  head.role === "user" &&
+  typeof head.content === "string" &&
+  head.content.startsWith(SUMMARY_MARK)
+) {
+  const markerEnd = head.content.indexOf("]\n\n");
+  if (markerEnd !== -1) {
+    previousSummary = head.content.slice(markerEnd + 3);
+    summarizeFrom = 1;
+  }
 }
 ```
 
-`contextWindow` 是所选模型的窗口配置，`reserveTokens` 是提前留出的余量。它不是每次请求的 `maxTokens`：后者限制这一次生成的输出，两者需要配合设置。
+这样，旧摘要不会混进 `serializeForSummary` 生成的对话文本，而是单独放入 `<previous-summary>` 标签。摘要请求同时包含这份旧摘要、本次需要纳入摘要的对话，以及 `UPDATE_SUMMARIZATION_PROMPT`。这个提示词要求保留已有信息，补充新进展和决策，把已完成事项移入 `Done`，更新下一步，并允许删除已不再相关的内容。
 
-用一组简化数字看这个判断。下面的 32,000 和 8,000 仅用于演示，不是 Ink 的默认配置：
+这里的“新信息”是相对于旧摘要而言的，**也包括上次保留原文、这次才移入摘要的消息**。沿用第 3 节图中的消息标记，把第一次生成的摘要记为 S1：第一次压缩得到 `S1 + M8 + M9`，之后又产生 `M10`、`M11`。假设第二次在 M10 前切分：
 
-| 时刻                                | 估算占用     | 压缩阈值                | 判断                 |
-| ----------------------------------- | ------------ | ----------------------- | -------------------- |
-| 测试前                              | 20,000 Token | 32,000 − 8,000 = 24,000 | 还没触发压缩         |
-| 加入一份约 6,000 Token 的测试输出后 | 26,000 Token | 24,000                  | 下一次调用前尝试压缩 |
+| 当前历史中的内容 | 本次怎样处理 |
+| ---------------- | ------------ |
+| S1：第一次生成的摘要 | 取出正文，作为需要更新的旧摘要 |
+| M8、M9：上次保留的测试调用与结果 | 作为本次需要纳入摘要的对话 |
+| M10、M11：更近期的消息 | 继续保留原文，不送去生成摘要 |
 
-`contextTokens` 由 `estimateContextTokens` 估算：优先参考最近一次模型调用返回的用量，再估算之后新增消息的长度；没有可用的用量记录时，就根据消息内容估算。
+模型需要生成一份完整的新摘要 S2，更新成功后的历史是 `S2 + M10 + M11`。例如，S1 中“修改后尚待验证”的进展，现在应结合 M9 更新为“普通用例通过，负数用例仍失败”。这是教学示例，具体措辞仍由模型生成。
 
-估算并不等于准确计数。当前 Ink 对未测量的内容采用字符数除以 4 的近似方法，首次估算也没有单独计入系统指令和工具说明。因此，这个判断只能帮助提前触发压缩，仍需要处理模型服务返回的超限错误。生成摘要本身也需要调用模型，应提前预留空间，不能等上下文完全装不下时才处理。
+如果切分点之前只有 S1，没有任何对话需要加入摘要，`toSummarize` 就是空数组，函数直接返回 `null`，不为改写旧摘要再调用一次模型。后续有可总结的消息、又满足压缩条件时，才会请求模型更新摘要。
 
-长度检查放在每次模型调用前。Agent 循环通过 `onBeforeTurn` 留出检查和整理历史的位置；处理完成后，再把当前的 `history` 交给模型。下面节选自 [`loop.ts`](https://github.com/FishInSalt/ink/blob/main/src/core/loop.ts)，省略类型和非主线分支，不能单独运行：
+这条更新路径旨在减少反复概括造成的信息漂移，不能保证摘要无损。它没有重新读取 S1 所替代的全部原始历史；如果旧摘要已经遗漏某个约束，单靠更新提示词也无法恢复它。
 
-```ts
-// 文件：src/core/loop.ts
-// 所在函数：runAgentLoop
-// 位于循环内；省略前面的中断检查和用户追加消息处理。
-await onBeforeTurn?.(history); // 调用前检查，必要时更新历史。
+**摘要生成到一半，达到输出上限怎么办**
 
-const assistant = await streamAssistant({
-  provider,
-  request: {
-    system,
-    messages: history,
-    tools,
-    model,
-    maxTokens,
-    thinking,
-    signal,
-  },
-  onEvent,
-  usage,
-});
-// 后续：保存模型回复，执行工具，再把结果加入 history。
-```
+压缩本身也是一次模型调用。如果摘要只写出了目标和部分进展，还没写完关键决策与下一步，就达到输出上限，这份摘要不能直接替换旧历史，否则后续工作可能丢失重要线索。
 
-调用方通过 `onBeforeTurn` 接入自动压缩。下面节选 `RunnerImpl.runTurnInner` 传给 `runAgentLoop` 的回调，保留自动压缩开关与触发条件：
+Ink 用 `summarizerMaxTokens` 为摘要请求单独计算输出上限：先取 `reserveTokens` 的 80% 并向下取整，若已知模型自身的输出上限，再取两者中较小的值。默认预留量为 32,768 时，前者是 26,214 Token；这只是上限，不表示每次都会生成这么多内容。
 
-```ts
-// 文件：src/runner.ts
-// 所在函数：RunnerImpl.runTurnInner
-// 节选 runAgentLoop 的 onBeforeTurn 配置；省略其他配置和错误提示包装。
-onBeforeTurn: session
-  ? async (history) => {
-      if (!this.autoCompact) return;
-      const est = estimateContextTokens(history);
-      if (!shouldCompact(est.tokens, settings)) return;
-      await this.compactAndSplice(provider, settings, model);
-    }
-  : undefined,
-```
+摘要首次生成时沿用会话的思考档位。对思考内容和正文共享输出预算的模型，较高的思考档位可能挤占摘要正文的空间。`summarizeWithRetry` 因此对 `max_tokens` 做了专门处理：
 
-这条自动压缩路径要求有会话且开启自动压缩。没有触发阈值时，历史保持原样；触发后，才进入 `compactAndSplice`。用户新要求和上一轮工具结果已经加入历史，因此检查针对的是即将用于下一次调用的信息。
+1. **先检查是否被中止**：如果收到中止信号，就拒绝不完整摘要，不再开始重试。
+2. **尝试降低思考档位**：只有首次返回 `max_tokens`，且模型支持的最低档位确实低于当前档位时，才在最低档位重试一次。原始待总结内容和输出上限保持不变；有些模型不能关闭思考，最低档位也不一定是 `off`。
+3. **仍不完整就报错**：没有更低档位、重试后仍为 `max_tokens`，或者最终摘要为空，都不会生成可替换历史的压缩结果。普通请求错误也不会自动进入这条降低思考档位的重试路径。
+
+这次重试针对的是**摘要输出被截断**。前面提到的上下文超限恢复，针对的是**请求输入装不下**，触发条件不同。降低思考档位也不能保证摘要一定成功，或保证其中的信息完整准确。
 
 **压缩后，怎样继续调用模型**
 
@@ -253,19 +323,28 @@ onBeforeTurn: session
 ```ts
 // 文件：src/runner.ts
 // 所在函数：RunnerImpl.compactAndSplice
-// 节选：省略 session 的获取与空值检查、思考配置和界面提示。
-const compacted = await compactSession({ session, provider, model, settings });
+// 节选：省略 session 的获取与空值检查、模型来源标记和界面提示。
+const compacted = await compactSession({
+  session,
+  provider,
+  model,
+  settings,
+  signal,
+  modelMaxTokens: modelMaxTokensFor(this.model),
+  thinking: this.level,
+});
 if (compacted) {
   this.history.splice(
     0,
     this.history.length,
     ...session.buildContext().messages
   );
+  this.syncEstimateFloor(); // 排除保留消息中压缩前的用量报告。
 }
 return compacted !== null;
 ```
 
-只有成功生成摘要并取得压缩结果后，才会更新历史；失败时保留原来的消息。
+只有成功生成摘要并取得压缩结果后，才会记录压缩结果并更新历史；失败时保留原来的消息。压缩最终失败时，当前运行会报错，不会拿着半份摘要继续请求模型。在调用前检查这条路径中，如果只是没有可供压缩的旧消息，函数返回 `null`，调用方则保留历史继续执行。
 
 `splice` 在原数组上更新内容，因此前面 Agent 循环中的 `messages: history` 随后取得的就是摘要和保留的近期消息。系统指令和可用工具仍通过 `system`、`tools` 提供，这次历史压缩没有改变它们。
 
@@ -273,7 +352,7 @@ return compacted !== null;
 
 ## 3. 图解：一次历史压缩的过程
 
-回到修复求和函数的任务。Agent 已经读取代码、修改函数并再次运行测试，准备带着最新结果调用模型。假设此时触发压缩，并在最新一组工具调用之前切分历史。下面沿着同一组消息，看它怎样变成“摘要 + 近期原文”。
+回到修复求和函数的任务。Agent 已经读取代码、修改函数并再次运行测试，准备带着最新结果调用模型。假设此时首次触发压缩，并在最新一组工具调用之前切分历史。下面沿着同一组消息，看它怎样变成“摘要 + 近期原文”。
 
 <ContextCompactionCompare />
 

@@ -1,7 +1,7 @@
 ---
 author: 折腾客
 pubDatetime: 2026-09-16T13:03:58Z
-modDatetime: 2026-09-19T15:54:45Z
+modDatetime: 2026-10-10T08:09:12Z
 title: "Coding Agent 原理与实践 02（下）：模型接入：流式响应与组装"
 featured: false
 draft: false
@@ -400,7 +400,38 @@ function safeParseJson(raw) {
 
 因此，收到 `message_end` 表示接入层结束了本次组装，并交出消息；内容是否被截断，还要看 `stopReason`，工具参数是否可用还要继续校验。它也不代表 Agent 已完成用户的任务。
 
-当前 Ink 的 Agent 循环没有专门处理 `stopReason: "max_tokens"` 的分支，不会自动续写。要处理这种情况，可以先向用户提示回复被截断；如果需要继续生成，还要设计后续请求，以及新旧内容怎样衔接。
+当前 Ink 会在 Agent 循环中继续检查这个停止原因，分别处理包含工具调用和不包含工具调用的回复。
+
+**回复包含工具调用时，拒绝执行这一条回复中的全部工具调用。** 即使某个调用的参数能解析成合法 JSON，也不能据此判断参数已经完整生成。下面节选 [`loop.ts`](https://github.com/FishInSalt/ink/blob/main/src/core/loop.ts) 中的处理分支；执行到这里时，循环尚未因中断或达到轮数上限而停止：
+
+```ts
+// 文件：src/core/loop.ts
+// 所在函数：runAgentLoop，已取得本次回复中的工具调用。
+// 节选截断判断与结果写入；省略中断后的结果补齐与空结果检查。
+const results: ToolResult[] = [];
+if (assistant.stopReason === "max_tokens") {
+  // 不执行工具，为每个调用生成一条错误结果。
+  failToolCallsFromTruncatedMessage(toolCalls, results, onEvent);
+} else {
+  await executeToolBatch(
+    toolCalls,
+    toolMap,
+    signal,
+    onToolCall,
+    onEvent,
+    results,
+    clock
+  );
+}
+// ……省略中断后的结果补齐与空结果检查。
+const toolResults: AgentMessage = { role: "toolResult", results };
+history.push(toolResults);
+onMessage?.(toolResults);
+```
+
+`failToolCallsFromTruncatedMessage` 为每个调用生成 `isError: true` 的结果，说明这次回复达到了输出上限，参数可能被截断，要求模型重新提出参数完整的调用。这些结果写入历史后，只要没有中断等停止条件，循环就会再次调用模型。后续生成的是新的回复，不会直接拼接到原来的参数字符串后面，也不能保证模型下一次一定能生成完整参数。
+
+**回复不包含工具调用时，标记回答被截断并提示用户。** 如果也没有待处理的追加输入，循环会结束运行，并在返回值中设置 `truncated: true`。[`runner.ts`](https://github.com/FishInSalt/ink/blob/main/src/runner.ts) 的 `printRunStats` 读取这个标记，提示回答达到了输出上限，用户可以再发一条消息继续。这个标记本身不会触发自动续写；此时返回的 `stopReason: "completed"` 表示循环已经结束，不能据此认定回答完整或任务完成。
 
 ## 5. 模型请求工具之后，轮到本地执行
 

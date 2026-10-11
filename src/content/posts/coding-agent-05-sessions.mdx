@@ -1,7 +1,7 @@
 ---
 author: 折腾客
 pubDatetime: 2026-09-19T02:20:04Z
-modDatetime: 2026-09-19T15:54:45Z
+modDatetime: 2026-10-11T02:52:06Z
 title: "Coding Agent 原理与实践 05：会话与持久化：保存记录，恢复任务"
 featured: false
 draft: false
@@ -69,18 +69,20 @@ return entry.id;
 
 `id` 标识这条会话记录；`parentId` 指向它接在哪条记录之后。`leafId` 保存当前所在记录的标识，新消息默认接在这里。恢复时可以沿着这些关联还原记录的先后顺序。
 
-真正的写入发生在 `append` 中：
+`append` 把记录序列化为 JSONL，再交给 `writeRecords` 写入；写入成功后，才更新内存中的索引：
 
 ```ts
 // 文件：src/core/session/store.ts
 // 所在函数：SessionStore.append
-appendFileSync(this.filePath, `${JSON.stringify(entry)}\n`, {
-  encoding: "utf8",
-});
+// 节选调用顺序：lines 是待写入的 JSONL，seed 是可选的模型信息。
+// 省略这两个变量的构造，以及写入成功后的模型信息缓存更新。
+this.writeRecords(lines, seed);
 this.indexEntry(entry);
 ```
 
-先追加到文件，再更新内存中的记录索引和当前位置。写入报错时，后面的索引更新不会执行。每次产生消息就保存，也缩小了异常退出时尚未保存的范围；当前路径保存的是完整消息，并不会把每个流式文字片段都写成一条会话记录。
+**创建会话对象时，还不会立刻创建会话文件；文件在首次实际写入记录时才创建。** `writeRecords` 区分两种情况：首次写入时，把会话头和首批记录一起写出；文件已经创建后，才向末尾追加。首次写入使用 `"wx"` 模式打开文件，若同一路径已经存在文件，会报错而不会覆盖它。首批记录也可能是模型设置等元数据，不一定是用户消息。
+
+这个顺序使内存中的记录索引和当前位置只在写入成功后更新；写入报错时，后面的 `indexEntry` 不会执行。每次产生消息就保存，也缩小了异常退出时尚未保存的范围；当前路径保存的是完整消息，并不会把每个流式文字片段都写成一条会话记录。
 
 ### 2.2 会话文件是怎么保存会话历史的？
 
@@ -96,7 +98,7 @@ Ink 把这些内容写成不同类型的记录，保存在同一个 **JSONL** �
 
 沿着修复求和函数的任务，看看这些记录分别长什么样。下面使用教学数据和缩短的标识；为方便阅读，把每条记录展开显示，实际文件中每条只占一行。消息与压缩记录省略时间戳等非关键字段。
 
-**会话开始时，先写入会话头。**
+**文件首次写入时，会话头位于第一行。**
 
 ```json
 {
@@ -222,26 +224,32 @@ Ink 把这些内容写成不同类型的记录，保存在同一个 **JSONL** �
 ```ts
 // 文件：src/runner.ts
 // 所在函数：RunnerImpl.resumeSession
-// 省略会话不存在时的报错，以及思考级别恢复和返回信息。
+// 省略会话不存在时的报错和返回信息。
 const store = resolveSession(this.options.cwd, {
   resume: id,
   baseDir: this.options.sessionBaseDir,
 });
 // 此处已确认 store 非空。
+const loaded = store.buildContext();
+this.restoreModelFromSession(store, false);
 this.sessionStore = store;
 this.history.length = 0;
-this.history.push(...store.buildContext().messages);
-this.system = this.assembleSystem();
+this.history.push(...loaded.messages);
+this.estimateFloor = loaded.compactionBoundary;
+this.restoreThinkingFromSession(store);
+this.systemText = this.assembleSystem();
 ```
 
-这里先清空当前内存中的历史，再放入所选会话的消息。系统指令通过 `assembleSystem` 重新组织，可用工具仍由当前 Agent 实例提供；恢复会话并不是把上次进程的所有内存照搬回来。
+这里不只恢复消息，还会按会话记录和当前配置恢复模型、思考级别，并恢复上下文估算所需的压缩边界。`estimateFloor` 标记从哪里开始寻找可用的用量记录，避免把压缩前的旧用量误当作压缩后历史的大小；具体估算机制见第 04 篇。
+
+随后使用的系统指令通过 `assembleSystem` 重新组织，可用工具仍由当前 Agent 实例提供。恢复会话并不是把上次进程的所有内存照搬回来，也不会无条件覆盖当前显式设置，例如启动时指定的思考级别会优先保留。
 
 `buildContext` 要回答的是：**保存的记录中，哪些应该成为这次继续对话的历史？** `getBranch()` 取得当前对话路径上的记录，并按从早到晚排列。没有发生压缩时，取出其中的消息；已经压缩过时，从这条路径最近一次压缩记录开始恢复。
 
 ```ts
 // 文件：src/core/session/store.ts
 // 所在函数：SessionStore.buildContext
-// 节选压缩后的恢复路径；省略未压缩路径、其他记录类型的处理和返回信息。
+// 节选压缩后的消息重建；省略未压缩路径、其他记录类型、压缩边界记录和返回信息。
 const branch = this.getBranch(); // 当前所在路径，按从早到晚排列。
 let lastCompactionIndex = -1;
 for (let i = 0; i < branch.length; i++) {
@@ -277,9 +285,18 @@ if (lastCompactionIndex !== -1) {
 
 JSONL 可以逐行解析，但进程突然退出时，最后一行可能是不完整的 JSON。Ink 的 `SessionStore.open` 在读取记录时，允许跳过解析或校验失败的最后一行，并输出提示；如果损坏出现在文件中间，则报错停止读取。
 
-中间记录可能是后续消息的前驱，随意跳过会破坏对话关系。即使每一行都能解析，`getBranch` 还会检查父链能否追溯到起点，遇到缺失的前驱也会报错。
+中间记录可能是后续消息的前驱，随意跳过会破坏对话关系。即使每一行都能解析，`getBranch` 还会检查父链能否追溯到起点，遇到缺失的前驱或循环引用也会报错。
 
-这里的容错仍有局限：当前跳过末行的逻辑只影响本次读取，没有修复磁盘上的坏尾部。要可靠地继续追加，需要先处理损坏部分，或将有效记录恢复到新文件中。成功读取已有消息，不代表原文件已经修好。
+**读取时跳过坏末行，不等于磁盘文件已经修好。** 当前普通会话恢复走的 `SessionStore.open` 和 `resumeSession` 都不会自动删掉坏尾部。假如文件末尾停在 `{"type":"message"`，直接追加下一条 JSON，只会把新内容接在这段残缺文本后面。
+
+**子代理续跑则有专门的修复步骤。** [`child-resume.ts`](https://github.com/FishInSalt/ink/blob/main/src/core/child-resume.ts) 中的 `buildContinuationHistory` 先检查工具调用与结果能否配对；检查通过后，再调用 `repairTornFinalLine`，让文件尾部适合继续追加：
+
+| 文件尾部的情况 | 修复方式 |
+| --- | --- |
+| 最后一条记录解析或校验失败，读取时已被跳过 | 截去这段无效尾部，保留此前有效记录 |
+| 最后一条记录完整有效，只缺少结尾换行符 | 只补一个换行符，保留这条记录 |
+
+第二种情况不能直接删掉末行：它已经是一条有效记录，后续消息还可能接在它后面。**这项自动修复目前接在子代理续跑路径中，不能推广为普通会话恢复也会自动修好文件。**
 
 ### 3.2 保存了工具调用，却没有保存结果
 
@@ -301,6 +318,10 @@ return [{ role: "toolResult", results }];
 ```
 
 `reason` 由调用方传入，用于说明退出原因；结果中的 `toolCallId` 仍对应原来的调用。这让历史保留了这次调用未正常收尾的信息，而不是伪造一个成功输出。这个退出钩子无法覆盖断电或进程被立即终止的情况，也不能据此认为任意损坏会话都会自动修复。
+
+如果子代理已经退出，来不及运行这个钩子，续跑时还有一次补齐机会。上节的 `buildContinuationHistory` 只允许补齐**最后一条模型回复中的未配对工具调用，且它后面只能有工具结果消息**。如果缺口之后已经出现新的用户消息或模型回复，或者结果重复、找不到对应调用，就拒绝续跑，不猜测这些记录应该怎样配对。
+
+例如，最后一条模型回复请求工具 A、B，文件里只保存了 A 的结果便中断；续跑时可以给 B 补上一条 `isError: true` 的结果，明确说明“结果尚未记录，实际执行结果未知，可能已部分执行”。修复文件尾部、保存这条补齐结果后，再重新构造历史；这一步不会自动重新执行 B。
 
 更重要的是，**缺少结果记录，只能说明没有保存结果，不能证明工具没有执行。** 文件可能已经修改，外部操作也可能已经生效。当前退出提示中的“工具尚未运行”不能当作这一事实的证明。恢复后应先确认实际状态，再决定是否重试；会话记录本身无法保证一次操作只执行一次。
 

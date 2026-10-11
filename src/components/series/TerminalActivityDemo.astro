@@ -30,16 +30,12 @@ const first = mode === "timer" ? timerFrame(0) : demo.frames[0];
     >
   </div>
   <div class="terminal-surface" aria-label="终端局部示意">
-    {
-      mode !== "timer" && (
-        <div class="terminal-region">
-          <span class="region-label">对话区</span>
-          <pre data-transcript>{first.transcript}</pre>
-        </div>
-      )
-    }
+    <div class="terminal-region">
+      <span class="region-label">对话区 · 调用与结果</span>
+      <pre data-transcript>{first.transcript}</pre>
+    </div>
     <div class="terminal-region activity-region">
-      <span class="region-label">活动区</span>
+      <span class="region-label">独立工作提示区</span>
       <pre data-activity>{first.activity}</pre>
     </div>
   </div>

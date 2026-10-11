@@ -1,7 +1,7 @@
 ---
 author: 折腾客
 pubDatetime: 2026-09-16T07:13:40Z
-modDatetime: 2026-09-16T13:03:58Z
+modDatetime: 2026-10-11T02:41:56Z
 title: "Coding Agent 原理与实践 02（上）：模型接入：请求与消息转换"
 featured: false
 draft: false
@@ -43,18 +43,25 @@ Agent Loop（Agent 循环）把任务交给模型，模型请求读取文件，�
 
 下面节选自 Ink 的 [`openai-completions.ts`](https://github.com/FishInSalt/ink/blob/main/src/provider/openai-completions.ts)。这个文件实现了对接 **Chat Completions API** 的 provider，负责转换请求、调用模型服务，以及处理返回的回复。先留意三个动作：转换消息、提取工具说明、发送请求。不必马上记住每个字段。
 
-代码保留主要调用和命名，省略类型、输出量配置、用量选项与兼容开关等细节，不能直接复制运行。
+代码保留主要调用和命名，省略类型、输出量配置、用量选项与部分兼容配置，不能直接复制运行。虽然本篇从读取文本文件讲起，当前接入层也要处理图片和思考内容的回传，因此先保留这些转换的入口。
 
 ```ts
+// 文件：src/provider/openai-completions.ts
 // 位于 provider 的 async *stream(request) 内。
 // apiKey、baseUrl 在创建 provider 时准备好。
 // 省略发送前的密钥检查，错误处理见 4.1。
 
 // ① 把内部消息转换成服务接收的格式。
+const family = options.name ?? "openai";
+const messages = downgradeUnsupportedImages(
+  request.messages,
+  modelSupportsVision(family, request.model)
+);
+// reasoningReplay 来自省略的思考内容回传配置；不需要回传时为 null。
 const body = {
   model: request.model,
   stream: true,
-  messages: toWireMessages(request.system, request.messages),
+  messages: toWireMessages(request.system, messages, reasoningReplay),
   // 省略输出量配置等字段。
 };
 
@@ -90,6 +97,8 @@ if (!response.ok || !response.body) {
 
 `request` 是 Agent 循环传入的内部请求，包含消息 `messages`、系统指令 `system`、工具 `tools`，以及模型配置和中断信号。接入层把它们转换成 **`body`：符合模型服务 API 要求的请求体**，再序列化为 JSON 发送。
 
+转换前，`downgradeUnsupportedImages` 会检查 Ink 对当前模型图片能力的判断：不支持时，在本次请求所用的消息中把图片块替换成文字占位，不修改原历史。`reasoningReplay` 则决定是否按当前模型的兼容规则回传思考内容；这里省略了它的配置过程。
+
 其中 `stream: true` 表示让服务逐步返回内容，接收过程在下篇展开。这里先看消息和工具定义怎样转换。
 
 ### 2.1 消息为什么还要转换一次
@@ -101,12 +110,13 @@ if (!response.ok || !response.body) {
 核心代码中的 `toWireMessages` 就做这件事。`wire` 在这里表示准备通过网络发送的格式。先看最简单的用户消息：
 
 ```ts
-// 节选 toWireMessages，省略类型和其他消息分支。
+// 文件：src/provider/openai-completions.ts
+// 节选 toWireMessages；省略类型、其他消息分支和工具图片缓存的刷新。
 const wire = [{ role: "system", content: system }];
 for (const msg of messages) {
   switch (msg.role) {
     case "user":
-      wire.push({ role: "user", content: msg.content });
+      wire.push({ role: "user", content: toUserParts(msg.content) });
       break;
     // assistant、toolResult 分支见 2.3。
   }
@@ -115,6 +125,8 @@ return wire;
 ```
 
 第一次调用时，内部历史只有“读取 README”这条用户消息。转换后，请求里多了开头的系统指令，用户消息的内容保持不变。
+
+这里经过了 `toUserParts`：字符串直接保留；如果用户消息是内容块数组，就把文本块和图片块转换成请求中的 `text`、`image_url` 部分。因而，读取 README 的纯文本例子可以保持原样，但不能把所有内部 `content` 都当作字符串直接发送。
 
 这里把系统指令放进 `role: "system"`，是所选源码的写法，不是所有模型接口的统一规则。这个例子用于解释转换的位置；接入具体模型时，还需要核对它支持的指令角色和请求参数。
 
@@ -130,14 +142,14 @@ return wire;
 
 `parameters` 用 **JSON Schema** 描述工具需要的参数。可以把它理解为一份参数格式说明：有哪些字段、每个字段是什么类型、哪些必须提供。
 
-下面是转换后 `body.tools` 数组中的一项，以读取文件的 `read` 工具为例。为了方便阅读，只保留文件路径参数，缩短了说明文字，省略了源码中的可选读取范围参数：
+下面是转换后 `body.tools` 数组中的一项，以读取文件的 `read` 工具为例。为了方便阅读，只保留文件路径参数，缩短了说明文字，省略了源码中的可选读取范围参数。当前 `read` 也支持图片，具体结果格式留到第 03 篇：
 
 ```json
 {
   "type": "function",
   "function": {
     "name": "read",
-    "description": "读取文本文件内容",
+    "description": "读取文本文件内容，或把支持的图片作为附件返回",
     "parameters": {
       "type": "object",
       "properties": {
@@ -167,9 +179,10 @@ return wire;
 
 这两条消息还需要通过**调用 ID** 对应起来。下面假设这次读取请求的 ID 是 `t1`，结果也要关联这个 ID。
 
-接着看 2.1 介绍过的 `toWireMessages`。先由 `assistant` 分支处理包含读取请求的模型回复：从 `msg.blocks` 提取文字和工具请求，再转换成 API 要求的格式。下面省略了 TypeScript 的类型收窄声明：
+接着看 2.1 介绍过的 `toWireMessages`。先由 `assistant` 分支处理包含读取请求的模型回复：从 `msg.blocks` 提取文字和工具请求，再转换成 API 要求的格式。下面省略 TypeScript 的类型收窄声明，以及由 `reasoningReplay` 控制的 `reasoning_content` 回传分支：
 
 ```ts
+// 文件：src/provider/openai-completions.ts
 // 位于 toWireMessages 中，按内部消息的 role 选择转换方式。
 switch (msg.role) {
   case "assistant": {
@@ -193,6 +206,7 @@ switch (msg.role) {
       role: "assistant",
       content: text === "" && toolCalls.length > 0 ? null : text,
       ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+      // 省略按 reasoningReplay 配置加入 reasoning_content 的逻辑。
     });
     break;
   }
@@ -203,17 +217,64 @@ switch (msg.role) {
 
 这里保留了工具请求的 ID `t1`。内部参数是 `{ path: "README.md" }`，API 中的 `function.arguments` 则要求使用包含 JSON 的**字符串**，所以需要调用 `JSON.stringify`。接收模型回复时还要做反向转换，下篇会展开。
 
-接下来是同一个函数中的 `toolResult` 分支，负责转换本地工具返回的结果：
+接下来是同一个函数中的 `toolResult` 分支，负责转换本地工具返回的结果。**内部的工具结果可能是字符串，也可能是文本和图片组成的内容块数组**，不能直接把 `r.content` 原样放进 `role: "tool"` 消息：
 
 ```ts
-case "toolResult":
+// 文件：src/provider/openai-completions.ts
+// toWireMessages 中的 toolResult 分支。
+// pendingImages 是函数内的图片缓存，声明与刷新位置在下文说明。
+case "toolResult": {
   for (const r of msg.results) {
-    wire.push({ role: "tool", tool_call_id: r.toolCallId, content: r.content });
+    let text = "";
+    let hasImages = false;
+    if (typeof r.content === "string") {
+      text = r.content;
+    } else {
+      const texts: string[] = [];
+      for (const block of r.content) {
+        if (block.type === "text") texts.push(block.text);
+        else {
+          hasImages = true;
+          pendingImages.push({
+            type: "image_url",
+            image_url: { url: `data:${block.mimeType};base64,${block.data}` },
+          });
+        }
+      }
+      text = texts.join("\n");
+    }
+    wire.push({
+      role: "tool",
+      tool_call_id: r.toolCallId,
+      content: text !== "" ? text : hasImages ? "(see attached image)" : "(no tool output)",
+    });
   }
   break;
+}
 ```
 
-内部的一条 `toolResult` 消息可以收集多个工具结果，这里把每个结果转换为一条 `role: "tool"` 消息。`content` 保存读取到的内容，`tool_call_id` 填入对应请求的 ID `t1`，表明“这是刚才那次读取的结果”。转换格式时要保留这个对应关系。
+内部的一条 `toolResult` 消息可以收集多个工具结果，这里把每个结果转换为一条 `role: "tool"` 消息。`content` 保存结果中的文字；没有文字时，按是否包含图片提供附件提示或空输出提示。`tool_call_id` 填入对应请求的 ID `t1`，表明“这是刚才那次读取的结果”。转换格式时要保留这个对应关系。
+
+**工具结果里的图片，为什么放在整批工具结果之后？** 这里说的是**下一次 HTTP 请求中 `messages` 的排列顺序**：工具已经执行完，接入层正在组装请求，文字和图片会随这一个请求一起发出。它与工具是否并发、谁先完成无关，也不表示要再等一次模型回复才发送图片。
+
+假设模型在同一条回复中提出两次 `read` 调用：`t1` 读取 `screenshot.png`，`t2` 读取 `README.md`。两次用的都是 `read` 工具，`t1`、`t2` 是用来区分它们的调用 ID。下面假设当前模型支持图片，文件内容是教学数据。
+
+读取截图后，`t1` 的结果包含两部分：**文字说明** `Read image file [image/png]`，以及**实际图片数据**。前者只说明读到了一张 PNG，不能代替图片本身。当前 Ink 的 Chat Completions 接入将文字放进 `tool` 消息，将图片转换成 `image_url` 内容块，另放进一条 `user` 消息。
+
+因此，这次工具执行完成后，下一次请求里的相关消息按下面的顺序排列；表格省略了更早的用户任务和系统指令：
+
+| 顺序与角色 | 消息中的内容 |
+| --- | --- |
+| ① `assistant` | 请求两次 `read`：`t1` 读截图，`t2` 读 README |
+| ② `tool` | `tool_call_id: "t1"`，文字为 `Read image file [image/png]` |
+| ③ `tool` | `tool_call_id: "t2"`，文字为 README 的内容，例如“启动命令：npm run dev” |
+| ④ `user` | 附件说明 + 截图的实际图片数据（`image_url` 内容块） |
+
+第 ②、③ 条分别回应 `t1`、`t2`，先把模型提出的这批工具调用配对补齐；第 ④ 条再携带图片。**第 ④ 条由接入层自动生成，不是用户又输入了一句话。** 如果把它插在第 ②、③ 条之间，消息序列就会在 `t2` 的结果出现之前转入一条 `user` 消息，打断这批工具结果的连续排列。
+
+代码中的 `pendingImages` 就用于暂存这些图片，`flushPendingImages` 负责生成最后的附件消息。即使一批结果分在连续的多条内部 `toolResult` 消息里，也要把它们处理完再放入图片；因此，源码在遇到非 `toolResult` 消息之前、以及遍历全部消息结束时刷新图片缓存。
+
+以上转换只使用历史中的结果 `content`；界面专用的 `display` 在结果写入历史前就已经移除。工具怎样生成文本、图片和显示内容，见[第 03 篇的 2.4、3.1 节](/posts/coding-agent-03-tools/#24-执行与反馈怎样把输出或错误交回-agent-循环)。
 
 请求与结果的完整配对由 Agent 循环保证，见[第 01 篇的中断处理](/posts/coding-agent-01-agent-loop/#43-用户中断时有些工具还没执行)；接入层只转换已有消息。
 
@@ -231,12 +292,13 @@ case "toolResult":
 | 模型请求工具     | `assistant.tool_calls`       | `assistant.content` 中的 `tool_use` |
 | 本地执行结果     | `role: "tool"` 消息          | `user.content` 中的 `tool_result`   |
 | 结果对应哪次调用 | `tool_call_id`               | `tool_use_id`                       |
+| 工具结果中的图片 | 连续工具结果之后，另用一条 `user` 消息携带 | 放在 `tool_result.content` 内部 |
 
 </div>
 
 这里的 `role: "user"` 是 Messages API 包装工具结果的方式，不表示用户又输入了一句话。这些格式差异由模型接入层处理，Agent 循环继续使用内部的统一消息格式。
 
-本篇只讨论文本和本地工具调用；其他内容可能还有服务特有的回传要求，不能据此认为所有模型的历史都能直接互换。
+本篇以文本和本地工具调用为主线，补充了图片的转换位置；思考内容的回传仍有服务和模型特有的要求，相关分支已在节选中标明省略，不能据此认为所有模型的历史都能直接互换。
 
 ## 3. 模拟运行：对照两次发出的请求
 
