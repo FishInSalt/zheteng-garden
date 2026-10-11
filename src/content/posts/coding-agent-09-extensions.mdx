@@ -1,7 +1,7 @@
 ---
 author: 折腾客
 pubDatetime: 2026-09-27T15:56:11Z
-modDatetime: 2026-10-11T03:25:46Z
+modDatetime: 2026-10-11T05:11:22Z
 title: "Coding Agent 原理与实践 09：扩展机制——怎样增加能力与自定义行为"
 featured: false
 draft: false
@@ -132,7 +132,7 @@ private fireObservers(eventName: ExtensionEventName, event: unknown): void {
 
 `run_end` 是一条通知，扩展系统不会等待处理函数的异步工作完成；处理函数抛出异常会被捕获并报告。工具调用前的 `tool_call` 则不同：它的处理结果决定工具是否执行，Agent 必须等待检查完成。这条路径已在第 08 篇展开。
 
-扩展还需要理解事件的触发边界：`run_end` 表示 Agent 循环返回了结束结果，**不等于任务成功，也不保证在所有异常下都会发出**。例如，上下文超限后恢复成功，仍会发出 `run_end`；如果错误未能恢复并向外抛出，就不会发出。因此，通知扩展可能收不到结束提醒，计时器等扩展也需要考虑缺少结束事件时怎样清理状态。
+扩展还需要区分两种结束方式：Agent 循环返回结束结果时，发出 `run_end`，但这**不等于任务成功**；运行中的错误未能恢复、最终向外抛出时，发出 `run_error`，其中的 `message` 提供简短的错误说明。同一次运行不会同时发出这两个事件。例如，上下文超限后恢复成功，仍走 `run_end`；恢复失败并抛出异常，才走 `run_error`。需要在运行结束后清理状态的扩展，应同时处理这两条路径。
 
 ### 2.3 用 `notify` 串起加载和运行
 
@@ -178,7 +178,7 @@ api.on("run_end", event => {
 3. 收到 `run_end` 后，回调取出起始时间并清空它。如果尚未记录起始时间，或者间隔不足 `minSec`，就不提醒。
 4. 满足条件时，扩展启动 macOS 通知和提示音，标题中带上这次运行的停止原因。
 
-`minSec` 默认是 5 秒，**从第一条完整模型回复算起**，并不是从用户提交任务时算起。
+`minSec` 默认是 5 秒，**从第一条完整模型回复算起**，并不是从用户提交任务时算起。这个示例没有订阅 `run_error`，因此运行异常退出时不会发送提醒。
 
 ## 3. 两个扩展示例：怎样增加工具和界面状态？
 
@@ -239,7 +239,7 @@ export default function (api) {
 
 ### 3.2 `task-timer`：在终端状态栏显示运行时间
 
-再看一个不由模型调用的扩展。[`task-timer.mjs`](https://github.com/FishInSalt/ink/blob/main/examples/extensions/task-timer.mjs) 在 Agent 开始运行后，让终端界面显示 `running 0:03` 这样的计时；结束时改为 `done in 0:03`。用户把文件放进扩展目录并重启 Ink 后，它会在初始化时登记两个事件处理函数：
+再看一个不由模型调用的扩展。[`task-timer.mjs`](https://github.com/FishInSalt/ink/blob/main/examples/extensions/task-timer.mjs) 在 Agent 开始运行后，让终端界面显示 `running 0:03` 这样的计时；循环返回结束结果时改为 `done in 0:03`，异常退出时则显示 `failed after 0:03`。用户把文件放进扩展目录并重启 Ink 后，它会在初始化时登记三个事件处理函数：
 
 ```js
 // 文件：examples/extensions/task-timer.mjs
@@ -274,14 +274,24 @@ export default function (api) {
     );
     roundStart = null;
   });
+
+  api.on("run_error", () => {
+    stopTick();
+    if (roundStart === null) return;
+    api.setStatus(
+      STATUS_KEY,
+      `failed after ${formatDuration(Date.now() - roundStart)}`
+    );
+    roundStart = null;
+  });
 }
 ```
 
-加载时，`api.on` 登记回调；运行开始后，`run_start` 回调记录时间，并通过定时器每秒调用 `api.setStatus`。这项接口把文字交给 Ink 的终端状态栏，不需要扩展自己移动光标或重绘界面。运行结束时，`run_end` 回调停止计时，改为显示总耗时。它复用了第 2 节的事件分发，但增加了一种新用途：**扩展可以在运行过程中更新界面状态，而不需要模型提出工具调用。**
+加载时，`api.on` 登记回调；运行开始后，`run_start` 回调记录时间，并通过定时器每秒调用 `api.setStatus`。这项接口把文字交给 Ink 的终端状态栏，不需要扩展自己移动光标或重绘界面。收到 `run_end` 或 `run_error` 后，对应回调都会停止计时、清空起始时间，并分别显示结束耗时或失败前的耗时。它复用了第 2 节的事件分发，但增加了一种新用途：**扩展可以在运行过程中更新界面状态，而不需要模型提出工具调用。**
 
 **上下文超限后的压缩和重试仍属于同一次运行。** 这期间不会再次发出 `run_start`，所以计时器持续计时，耗时包含恢复过程；重试返回后，收到 `run_end` 才停止。取消或达到轮数阈值时，只要循环返回结束结果，也会显示 `done in …`，这里的 `done` 同样不代表任务成功。
 
-当前 `setStatus` 只支持状态栏的一行文字；在非交互的打印模式中不会显示。如果错误最终向外抛出、没有恢复，`run_end` 就不会发出，计时状态要等下一次 `run_start` 才会重置。这个例子也引出了更复杂的扩展需要考虑的问题：运行状态如何保存、界面能由扩展控制到什么程度、长期资源何时清理。
+当前 `setStatus` 只支持状态栏的一行文字；在非交互的打印模式中不会显示。计时结果也不会随会话保存和恢复。这个例子引出了更复杂的扩展需要考虑的问题：运行状态如何保存、界面能由扩展控制到什么程度、长期资源何时清理。
 
 ## 4. 以 pi 为例，更完整的扩展机制还需要什么？
 
@@ -326,7 +336,7 @@ Ink 已有 `setStatus` 这样的一行状态接口，`task-timer` 正在使用�
 
 ### 4.4 重新加载或切换会话时，清理旧资源
 
-前面的 `task-timer` 收到 `run_end` 时会清除定时器，包括上下文超限后恢复成功的情况；若错误最终向外抛出，这个事件就不会发出，计时会持续到下一次运行开始。更复杂的扩展还可能长期监听文件：重新加载后如果不清理旧监听器，同一次文件变化就可能触发两次更新。
+前面的 `task-timer` 已经通过 `run_end` 和 `run_error` 处理运行结束时的计时清理，但切换会话是另一件事。例如，上一段会话留下的 `done in …`，在新建或恢复另一段会话后仍可能显示，直到下一次运行才更新。扩展需要知道会话何时发生变化，才能及时清除旧状态。更复杂的扩展还可能长期监听文件：重新加载后如果不清理旧监听器，同一次文件变化就可能触发两次更新。
 
 pi 定义了 `session_shutdown` 事件，其原因包括退出、重新加载和会话替换。扩展可以在这个时机关闭监听器、停止定时器，再在新会话中建立所需的资源；清理逻辑应能安全地重复调用。这仍需要扩展作者配合，并不是宿主自动知道所有资源该怎样关闭。[pi 生命周期接口](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/core/extensions/types.ts)
 

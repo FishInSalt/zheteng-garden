@@ -1,7 +1,7 @@
 ---
 author: 折腾客
 pubDatetime: 2026-09-25T10:06:43Z
-modDatetime: 2026-10-10T13:59:44Z
+modDatetime: 2026-10-11T05:44:40Z
 title: "Coding Agent 原理与实践 08：权限与信任——怎样控制 Agent 的执行风险"
 featured: false
 draft: false
@@ -9,7 +9,7 @@ tags:
   - Coding Agent
   - ink
   - Agent 原理
-description: 从项目资源加载和工具操作两类风险出发，解释 Ink 怎样通过项目信任、执行前检查与用户审批应对风险，以及授权范围、执行隔离和失败处理还需要解决哪些问题。
+description: 从项目资源加载和工具操作两类风险出发，解释 Ink 内置的项目信任检查，以及 Guardian 扩展怎样利用执行前钩子和用户确认接口控制工具操作，再讨论当前方案的局限。
 ---
 
 import PermissionBoundaryDiagram from "@/components/series/PermissionBoundaryDiagram.astro";
@@ -33,7 +33,8 @@ Ink 也支持加载项目资源。例如，`.ink/extensions` 中的扩展是 Jav
 ```ts
 // 文件：src/extensions/loader.ts
 // 所在函数：loadExtensions，遍历待加载扩展的循环内部。
-// 启动流程先做项目信任检查；获准的项目扩展才会进入这里。
+// 从项目 .ink/extensions 目录自动发现的扩展，需通过项目信任检查才会进入这里。
+// 全局扩展和通过 -e 显式指定的扩展不受这道检查控制。
 // candidate.path 是扩展文件路径。省略类型、导出校验、注册管理和异常处理。
 
 // 导入模块时，就会执行模块顶层代码。
@@ -59,7 +60,7 @@ await factory(
 
 这与 `AGENTS.md` 这类文字规则不同：文字通过影响模型来影响后续操作，扩展代码则可以直接使用当前进程的权限访问文件或网络。
 
-因此，Ink 把项目信任检查放在资源加载之前：**先由用户决定是否启用这些项目资源，再加载其中的扩展代码。**
+对受项目信任检查控制的资源，Ink 会先根据用户指定的决定或已有信任记录，判断是否允许加载；需要确认且支持交互时，再询问用户。**获准后，才加载这些资源，包括其中的项目扩展。**
 
 <PermissionBoundaryDiagram variant="trust" />
 
@@ -291,7 +292,8 @@ Guardian 通过 `api.on("tool_call", handler)` 注册检查函数。调用时，
 // 文件：examples/extensions/guardian.mjs
 // 所在位置：default 导出函数注册的 tool_call 回调
 // 节选：已确认工具是 write/edit，text 在外层声明。
-const target = typeof event.args?.path === "string" ? event.args.path : undefined;
+const target =
+  typeof event.args?.path === "string" ? event.args.path : undefined;
 const base = typeof event.cwd === "string" ? event.cwd : api.cwd;
 text = target === undefined ? undefined : path.resolve(base, target);
 
@@ -302,9 +304,10 @@ if (hit.kind === "deny") {
   // ……省略审计记录。
   return {
     block: true,
-    reason: hit.rule.reason === ""
-      ? `blocked by guardian rule: ${hit.rule.source}`
-      : hit.rule.reason,
+    reason:
+      hit.rule.reason === ""
+        ? `blocked by guardian rule: ${hit.rule.source}`
+        : hit.rule.reason,
   };
 }
 // 后续处理 ask：等待确认，再决定是否阻止调用。
@@ -330,25 +333,32 @@ if (hit.kind === "deny") {
 // 文件：examples/extensions/guardian.mjs
 // 所在位置：tool_call 回调的 ask 分支。
 // 节选 write/edit 路径；省略 Bash 预览、审计记录与内部异常的确认分支。
-const detail = hit.rule.reason === ""
-  ? `guardian ask rule: ${hit.rule.source}`
-  : hit.rule.reason;
+const detail =
+  hit.rule.reason === ""
+    ? `guardian ask rule: ${hit.rule.source}`
+    : hit.rule.reason;
 const options = {
   sessionKey: "guardian:session",
   rememberLabel: "all guardian ask prompts this session",
   ...(askTimeoutMs !== undefined ? { timeoutMs: askTimeoutMs } : {}),
 };
-const outcome = await api.confirm(`allow this ${tool}?`, `${text}\n${detail}`, options);
+const outcome = await api.confirm(
+  `allow this ${tool}?`,
+  `${text}\n${detail}`,
+  options
+);
 // ……省略审计记录，记录 approved、denied 或 timeout。
 if (outcome === true) return undefined;
-const declined = outcome === "timeout"
-  ? askTimeoutMs === undefined
-    ? "the confirmation timed out — the call was not approved"
-    : `the confirmation timed out after ${humanDuration(askTimeoutMs)} — the call was not approved`
-  : "the user declined this call";
+const declined =
+  outcome === "timeout"
+    ? askTimeoutMs === undefined
+      ? "the confirmation timed out — the call was not approved"
+      : `the confirmation timed out after ${humanDuration(askTimeoutMs)} — the call was not approved`
+    : "the user declined this call";
 return {
   block: true,
-  reason: hit.rule.reason === "" ? declined : `${hit.rule.reason} — ${declined}`,
+  reason:
+    hit.rule.reason === "" ? declined : `${hit.rule.reason} — ${declined}`,
 };
 ```
 
@@ -360,14 +370,14 @@ return {
 
 无论用户拒绝还是询问超时，Guardian 都会返回 `{ block: true, reason: ... }`。Agent 循环把原因作为工具结果写入历史，让模型在下一次调用时知道这次操作没有执行。
 
-### 3.4 当前方案还存在哪些局限？
+### 3.4 Guardian 的检查和 Ink 的执行机制，还有哪些局限？
 
-这套机制能在工具执行前阻止命中规则的调用，但目前还有几处明显的局限：
+Guardian 负责匹配规则、决定是否请求批准，Ink 提供询问用户和阻止工具执行的机制。两者配合能拦截命中规则的调用，但仍有以下局限：
 
-- **检查依赖扩展和配置。** Guardian 是可选扩展；没有加载或没有规则时，不会提供相应拦截。配置错误会保留上一次有效规则，不会自动切换为全部拒绝。
-- **审批范围比较粗。** 选择“本次会话不再询问”会覆盖所有正常 Guardian ask 提示，后续不同命令或路径都可能复用批准；deny 规则仍生效。
-- **规则只能识别部分风险。** 路径经 `path.resolve` 处理后仍是字符串匹配，Bash 也按命令文本匹配；它不会完整解析 Shell 行为，也不能保证识别符号链接或脚本内部的访问。
-- **通过检查后，没有进一步限制实际访问。** 工具使用当前用户权限运行，Ink 尚未提供操作系统级沙箱。一个获准运行的脚本，仍可能访问任务之外的文件或网络。
+- **Guardian 的检查依赖加载和配置。** 没有加载扩展或没有配置规则时，不会提供相应拦截。配置错误时，Guardian 保留上一次有效规则，不会自动切换为全部拒绝。
+- **Guardian 的批准记忆范围比较粗。** Guardian 为正常 ask 提示使用同一个 `sessionKey`，Ink 按这个键记住批准。因此，选择“本次会话不再询问”后，不同命令或路径可能复用同一份批准；Guardian 的 deny 规则仍优先执行。
+- **Guardian 的规则只能识别部分风险。** 路径经 `path.resolve` 处理后仍是字符串匹配，Bash 也按命令文本匹配；Guardian 不会完整解析 Shell 行为，也不能保证识别符号链接或脚本内部的访问。
+- **Ink 尚未提供操作系统级沙箱。** 工具使用当前用户权限运行，Guardian 的执行前检查不会限制代码运行时的实际访问。一个获准运行的脚本，仍可能访问任务之外的文件或网络。
 
 因此，执行前检查只是风险控制的一部分。要限制操作真正造成的影响，还需要约束它运行时能够访问的资源。
 
