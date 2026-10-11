@@ -84,7 +84,15 @@ SITE_URL=https://your-domain.example pnpm build
 
 ## 依赖维护
 
-上线时已将 Astro 更新到 7.3.2，并更新兼容范围内的依赖。`pnpm-workspace.yaml` 中将旧版 `@astrojs/internal-helpers@0.10.0` 定向覆盖到 0.10.4，修复可选依赖链中的 YAML/TOML 解析器告警；上游修复依赖声明后可移除此覆盖。升级后运行 `pnpm audit` 和 `pnpm build`，再检查文章与搜索。
+安全更新优先在现有版本范围内更新受影响依赖，并提交 `pnpm-lock.yaml`。`sharp` 的最低版本为 0.35.5，以包含上游 librsvg 的安全修复。
+
+`pnpm-workspace.yaml` 保留三项定向覆盖：
+
+- 将旧版 `@astrojs/internal-helpers@0.10.0` 覆盖到 0.10.4，替换可选依赖链中的旧版 YAML/TOML 解析器；解析器自身仍需随安全公告更新。
+- 将受影响的 `smol-toml@<1.9.0` 覆盖到 `^1.9.1`，避免旧 helper 分支在更新间接依赖时仍保留 1.8.0，修复 TOML 解析的 CPU 耗尽问题（GHSA-r4xh-jqrq-34v2）。
+- 将 `@tailwindcss/typography@0.5.20` 固定依赖的 `postcss-selector-parser@6.0.10` 覆盖到 7.1.6，修复选择器解析的 CPU 耗尽问题（GHSA-rj75-hqrm-r3gf）。该覆盖跨越主版本，调整时应比较生成的 CSS 并检查文章排版。
+
+上游修复对应依赖声明后可移除覆盖。升级后运行 `pnpm audit`、`pnpm lint`、`pnpm format:check` 和 `pnpm build`，再检查文章与搜索。
 
 ## 来源与许可证
 
