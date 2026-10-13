@@ -1,0 +1,452 @@
+---
+author: 折腾客
+pubDatetime: 2026-10-13T15:42:21Z
+title: "Coding Agent 原理与实践 12：MCP——外部工具接入的统一协议"
+featured: false
+draft: false
+tags:
+  - Coding Agent
+  - ink
+  - Agent 原理
+description: 解释 MCP 是什么，以及统一协议怎样减少外部工具接入中的重复适配；再以查询天气为例，追踪 Ink 中的服务连接、工具发现、调用和失败处理。
+---
+
+import McpToolFlow from "@/components/series/McpToolFlow.astro";
+
+## 1. MCP 是什么，为什么需要它？
+
+**MCP（Model Context Protocol，模型上下文协议）是一种连接 AI 应用与外部数据源、工具的开放协议。** 它把应用与外部服务之间的对接规则标准化，让双方按统一约定交换请求和结果。[官方规范](https://modelcontextprotocol.io/specification/2025-06-18)还定义了资源、提示词等能力，本篇聚焦 Ink 已接入的**工具**。
+
+对于工具，MCP 约定了怎样发现工具、描述参数、发起调用和返回结果。应用实现相应的 MCP 客户端，服务提供兼容的 MCP 接口，就有了可以复用的接入方式，减少为每种应用分别编写对接代码的工作。
+
+用一个简单任务来看这个区别。假设我们准备明天出门，想让 Agent 帮忙查一下天气：
+
+> 查一下杭州明天的天气，告诉我出门要不要带伞。
+
+模型知道下雨时通常需要带伞，但要回答杭州明天会不会下雨，还需要取得最新的天气预报。查询工具负责从天气服务取得数据，模型再根据结果给出建议。
+
+一种做法是编写一个工具，在它的执行函数中调用天气服务的 API。这个工具需要处理认证、城市参数和返回格式，再按照 Agent 的工具接口注册。[第 03 篇](/posts/coding-agent-03-tools/)已经介绍过这条接入路径。如果另一个 AI 应用也需要查询同一天气服务，它还需要把这套查询逻辑接入自己的工具接口。
+
+如果将天气查询封装成 MCP 服务，情况就不同了：**服务按 MCP 约定公布工具，支持相应协议能力的应用可以通过通用客户端发现并调用它。** 天气 API 的具体适配集中在服务端；Agent 把取得的工具说明交给模型，再执行模型选择的调用。其他兼容的应用也可以复用这个服务。
+
+这里统一的是工具描述和调用的协议规则。查询哪座城市、返回哪些天气字段，仍由具体工具定义；服务端仍要实现查询逻辑，应用也仍要处理连接配置、认证和权限。MCP 的价值在于让两端能够复用同一套对接约定。
+
+同样的接入方式也适用于[更多场景](https://modelcontextprotocol.io/docs/getting-started/intro#what-can-mcp-enable)：通过提供相应工具的 MCP 服务，Agent 可以搜索文档中的资料、查询数据库里的销售记录、查看日历并创建提醒，或读取设计稿来辅助页面开发。这些任务涉及资料检索、数据分析、日程管理和软件开发，服务提供的具体能力各不相同，但发现和调用工具都可以遵循同一套 MCP 协议。
+
+下面回到天气查询，用一个名为 `weather` 的教学示例贯穿全文。它提供 `get_forecast` 工具，用城市名 `city` 查询该城市明天的天气。工具名称、天气结果和报文都是示意数据，不对应某个厂商的实际接口，也不是真实天气预报。我们要追踪的是：查询天气的能力怎样接入 Agent，让模型拿到结果后回答“要不要带伞”？
+
+## 2. 把天气工具接入 Agent
+
+假设某个外部天气服务提供商已经通过 MCP 提供了 `get_forecast` 工具。我们希望把它接入 Ink，使用户问“杭州明天出门要不要带伞”时，Agent 能查询天气，再根据结果回答。先看 Ink 怎样找到这个服务。
+
+### 2.1 在配置中登记天气服务
+
+接入天气工具之前，需要先告诉 Ink 怎样连接天气服务。MCP 服务既可以由提供商部署在远端，也可以作为程序在本机运行，两种方式对应不同的连接配置。
+
+先看远端服务。假设提供商给出了一个 MCP 地址，我们可以在项目的 `.mcp.json` 中登记它。下面的域名和认证信息均为教学示意：
+
+```json
+{
+  "mcpServers": {
+    "weather": {
+      "url": "https://weather.example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer ${WEATHER_TOKEN}"
+      }
+    }
+  }
+}
+```
+
+`weather` 是我们给这个服务起的配置名称，`url` 指定它的 MCP 端点。服务程序运行在提供商一侧，Ink 通过 **Streamable HTTP** 与它通信：把 MCP 请求放进 HTTP POST 请求体，发送到这个地址，再从 HTTP 响应中取得结果。`headers` 则附带服务要求的认证信息；这里的 `${WEATHER_TOKEN}` 会被替换为当前进程中同名环境变量的值。
+
+如果服务需要在本机运行，配置中就要提供启动命令。假设天气服务程序已经安装，可以将 `weather` 改为下面的配置，并把路径替换为实际位置：
+
+```json
+{
+  "mcpServers": {
+    "weather": {
+      "command": "node",
+      "args": ["/path/to/weather-server.mjs"]
+    }
+  }
+}
+```
+
+采用这份配置后，Ink 会启动 `node /path/to/weather-server.mjs` 子进程，把 MCP 请求编码成一行 JSON，写入它的标准输入，再从标准输出按行读取响应。这种通过标准输入、标准输出交换消息的传输方式称为 **stdio**。
+
+两种方式的消息传递途径不同，工具发现和调用仍遵循同一套 MCP 协议。具体传输规则可参见本文所用版本的[传输规范](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports)。
+
+配置发现由 [`src/mcp/config.ts`](https://github.com/FishInSalt/ink/blob/main/src/mcp/config.ts) 负责：先读取用户级配置，再读取项目的 `.mcp.json` 和 `mcp.json`。后出现的同名服务会**整条替换**前面的配置，而不是逐字段合并。例如项目配置重新定义了 `weather`，就不会自动继承用户配置里的认证头。
+
+项目配置还要经过[第 08 篇](/posts/coding-agent-08-trust/)介绍的信任检查：项目未获信任时，这两个文件会被跳过。这个检查发生在采用配置、启动进程或连接服务之前。因为一份本地 MCP 配置可以要求执行命令，读取它不能仅仅视为读取普通文章或项目说明。
+
+两种配置分别告诉 Ink：向哪个远端地址发送请求，或者启动哪个本地程序。**它们登记的都是连接信息，因此不需要在这里填写 `get_forecast` 的名称和参数定义。** 建立连接后，Ink 才会向天气服务询问它提供了哪些工具，取得这些工具的说明。
+
+### 2.2 连接服务，取回工具说明
+
+配置被采用以后，Ink 的 `createMcpSetup` 会创建 **MCP 服务管理器（`McpManager`）**。这是 Ink 内部负责 MCP 服务接入的组件，维护各个服务的连接，并将发现的工具接入 Runner 的工具表。随后，`createMcpSetup` 把 Runner 的工具数组交给它，再发起异步连接。下面节选函数末尾的几行，前面的配置发现、模块开关与 MCP 服务管理器构造已省略：
+
+```ts
+// src/cli.ts，createMcpSetup
+manager.attachToolsArray(runner.tools); // 后续把外部工具加入同一张工具表
+manager.connectAll(); // 发起连接，不等待所有服务就绪
+return manager;
+```
+
+代码中的 `manager` 就是刚创建的 `McpManager` 实例。`attachToolsArray` 让它持有 Runner 使用的工具数组，后面发现的天气工具才能加入这张表。`connectAll` 发起连接而不等待完成，所以界面可以先启动；此时 `weather` 可能仍在初始化，模型还没有它的工具。用 `/mcp` 可以查看各服务的连接状态和工具数量。
+
+MCP 服务管理器会为 `weather` 创建一个 MCP 客户端（`McpClient`），由客户端和服务通信。这里的 Ink 是 **Host（宿主应用）**，内部的通信组件是 **Client（客户端）**，封装天气查询的服务程序是 **Server（服务端）**。这对应 [MCP 架构](https://modelcontextprotocol.io/specification/2025-06-18/architecture)中的三个角色。一个宿主可以管理多个客户端，分别连接不同服务。
+
+下面按 Ink 请求的 `2025-06-18` 版本规范解释初始化和会话行为，这些细节不代表所有后续协议版本。
+
+准备好收发消息的通道后，Ink 会先和 `weather` 完成初始化，再获取工具列表。下面用自然语言说明[生命周期规范](https://modelcontextprotocol.io/specification/2025-06-18/basic/lifecycle)在这个例子中的交互顺序，假设天气服务支持 Ink 请求的协议版本。引号中的话概括消息含义，并非实际报文：
+
+1. **Ink 发送 `initialize` 请求**：“我是 Ink，使用 `2025-06-18` 版本的 MCP 协议，准备接入你的服务。”
+2. **`weather` 返回初始化响应**：“我是天气服务，我也支持这个版本，并提供可供你调用的工具。”
+3. **Ink 发送 `notifications/initialized` 通知**：“初始化完成，我已准备好开始使用服务。”这是一条通知，不需要服务端再回复。
+4. **Ink 发送 `tools/list` 请求**：“请告诉我有哪些工具、分别做什么，以及调用时需要提供哪些参数。”
+
+前三步由 [`McpClient.connect`](https://github.com/FishInSalt/ink/blob/main/src/mcp/client.ts) 完成。**完成初始化时，Ink 还没有拿到 `get_forecast` 的定义。** 具体的工具名称、用途和参数要求，要通过第四步取得。
+
+初始化完成后，客户端就可以发出下面这样的[工具发现请求](https://modelcontextprotocol.io/specification/2025-06-18/server/tools#listing-tools)。报文和编号均为示意：
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "tools/list"
+}
+```
+
+假设 `weather` 在响应的 `result.tools` 数组里返回了下面这项定义。这里仅展示一个工具元素：
+
+```json
+{
+  "name": "get_forecast",
+  "description": "查询指定城市明天的天气预报",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "city": { "type": "string" }
+    },
+    "required": ["city"],
+    "additionalProperties": false
+  }
+}
+```
+
+现在，Ink 才取得了 `get_forecast` 的名字、用途和参数要求：`city` 必须是字符串，且必须提供。这里还没有填写“杭州”，因为此刻是在发现工具；具体查询哪座城市，要等用户任务触发调用时再决定。
+
+`tools/list` 支持分页。Ink 用响应中的 `nextCursor` 请求下一页，直到没有下一页，或者达到自身设定的 10 页上限。达到上限会保留已取得的工具并给出提示，防止一个一直返回游标的服务让发现过程无限继续。
+
+Ink 当前还没有严格核验服务端返回的协议版本和工具能力。上面的流程以天气服务与 Ink 兼容为前提，初始化成功并不意味着任意 MCP 服务都能使用。
+
+### 2.3 把 get_forecast 变成可执行工具
+
+工具说明已经回到 Ink，接下来要为它建立执行入口，并加入前面那张工具表。MCP 服务管理器的 `connectServer` 把这些步骤连在一起：
+
+```ts
+// src/mcp/manager.ts，McpManager.connectServer 的 try 分支
+// 省略：客户端构造及异常分支。
+await client.connect();
+const { tools: infos, capped } = await client.listTools();
+// 省略：capped 为 true 时，提示工具列表已达到分页上限。
+
+state.tools = this.bridgeAll(state, infos); // 描述数据 → Ink Tool 对象
+state.status = "connected";
+state.attempts = 0;
+this.applyTools(state); // 尝试同步到 Runner 的工具表
+// 省略：工具就绪的界面提示。
+```
+
+本例的 `infos` 中包含刚才的 `get_forecast` 定义。`bridgeAll` 会把它转换为 Ink 自己的工具对象，`applyTools` 再尝试更新 Runner 的工具表。
+
+[第 03 篇](/posts/coding-agent-03-tools/)介绍过，一个 Ink 工具既包含名称、描述和参数结构，也包含 `execute` 函数。MCP 服务传回来的是描述数据，不会把一个 JavaScript 函数传进 Agent 进程。因此，宿主要为它补上执行入口。
+
+这一步由 [`bridgeTool`](https://github.com/FishInSalt/ink/blob/main/src/mcp/bridge.ts) 完成。下面节选返回工具对象的部分；名称检查和描述缺失时的处理发生在此前，已省略：
+
+```ts
+// src/mcp/bridge.ts，bridgeTool 的返回值
+return {
+  tool: {
+    name: named.name, // weather_get_forecast
+    description, // 保留完整工具描述
+    promptSnippet: truncateAtWord(description, 100),
+    mcpServer: server,
+    parameters: normalizeInputSchema(info.inputSchema),
+    async execute(args, signal): Promise<ToolExecuteResult> {
+      try {
+        return await call(args, signal); // 转交 MCP 服务管理器的调用入口
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return { output: `MCP call failed: ${message}`, isError: true };
+      }
+    },
+  },
+};
+```
+
+组合名称采用“配置中的服务名 + 下划线 + 服务端工具名”，所以本例注册为 `weather_get_forecast`。给名称加上服务前缀，可以区分不同服务提供的同名工具；组合后仍要通过 Ink 的工具命名检查，注册时也会跳过与已有工具冲突的名称。
+
+对应到这份天气定义，`description` 保留“查询指定城市明天的天气预报”，`parameters` 接收 `city` 的参数结构，`execute` 则补上“把调用发回天气服务”的动作。注册之后，执行循环就能像查找本地工具一样，按 `weather_get_forecast` 找到这个入口。
+
+参数结构经过 `normalizeInputSchema` 处理。正常的 `type: "object"` Schema 原样保留；缺少 `type` 时补上；明确声明了其他字符串类型或无法使用的输入，则退回宽松的对象结构。因此，这一步主要处理输入形状，不能代替服务端对业务参数的验证。
+
+其中的 `call` 是 MCP 服务管理器传入的回调。它记住服务名和原始工具名，再调用 `McpManager.callTool`：模型使用 `weather_get_forecast`，发给 `weather` 服务的名称仍然是 `get_forecast`。
+
+天气工具的执行入口每次都会把请求交给 MCP 服务管理器，由管理器取得当前可用的客户端。如果连接断开后成功重建，工具就能通过管理器使用新的客户端继续调用天气服务。
+
+### 2.4 天气工具什么时候进入可用工具表？
+
+假设 Agent 已经开始处理用户的请求，调用过一次模型，此时 `weather` 才完成连接。能否立刻把 `weather_get_forecast` 加进工具数组，让下一次模型调用使用？
+
+要回答这个问题，需要看执行循环的两处行为：
+
+1. 一次 Agent 运行开始时，循环从工具数组创建 `toolMap`，后续按名称查找执行函数。
+2. 这次运行中的每次模型请求，仍然使用传入的 `tools` 数组。
+
+如果运行途中只更新数组，下一次请求可能已经把新工具发给模型，但旧的 `toolMap` 里还找不到它。模型选择了一个刚刚被告知存在的工具，执行时却收到 `unknown tool`。
+
+因此，MCP 服务管理器在 Agent 忙碌时先记录“需要同步”，等一次运行结束或下一次运行开始时再更新：
+
+```ts
+// src/mcp/manager.ts，McpManager.applyTools
+private applyTools(state: ServerState): void {
+  if (this.shared === null) return;
+  if (this.busy) {
+    state.pendingSync = true; // 发现结果已保存，暂不改变当前运行的工具表
+    return;
+  }
+  this.syncNow(state);
+}
+```
+
+这里的“一次运行”可能包含多次模型调用和工具执行，并不是一次模型响应。时间顺序是：
+
+| 时刻             | 服务状态                      | 模型与执行循环能否使用新工具     |
+| ---------------- | ----------------------------- | -------------------------------- |
+| 本次运行开始     | `weather` 仍在连接            | 工具尚未加入                     |
+| 运行途中连接成功 | 描述和桥接结果已经保存        | 暂存，当前运行继续使用原工具集合 |
+| 本次运行结束     | 执行 `onRunEnd`，同步工具数组 | 为后续运行准备好新工具           |
+| 下次运行开始     | 从更新后的数组建立 `toolMap`  | 工具说明与执行入口一致           |
+
+同步后，`onToolsChanged` 还会让 Runner 重新组装系统提示中的工具目录。完整描述留在模型请求的工具定义里，简短目录帮助模型选择工具；目录刷新与执行入口更新是同一次同步的两项结果。
+
+因此，如果 `weather` 在任务进行中才连接成功，本次任务仍会使用原来的工具集合；新工具要等任务结束后同步，供下一次任务使用。此时 `/mcp` 显示“已连接”，也不意味着当前任务已经能使用天气工具。
+
+## 3. 让天气工具参与一次回答
+
+### 3.1 把工具说明随任务交给模型
+
+现在假设天气工具已经在本次任务开始前注册好。用户提出“查一下杭州明天的天气，告诉我出门要不要带伞”，模型需要同时拿到这条任务和可用工具的说明。下面节选 Ink 的[执行循环](https://github.com/FishInSalt/ink/blob/main/src/core/loop.ts)，只保留对话与工具传入模型请求的位置，其余调用字段已省略：
+
+```ts
+// src/core/loop.ts，runAgentLoop 内的模型请求节选
+const assistant = await streamAssistant({
+  request: {
+    messages: history,
+    tools,
+  },
+});
+```
+
+`history` 中有用户的天气问题，`tools` 中有刚注册的 `weather_get_forecast`。模型接入层把它的名称、描述和 `city` 参数规则交给模型，所以模型能知道“有一个查明天天气的工具，调用时需要提供城市名”。工具的执行函数仍留在 Ink 内部。
+
+在这个例子中，假设模型决定先查询天气，生成下面的调用。这是 Ink 内部消息中的一个工具调用块；此时只有调用请求，天气查询还没有执行：
+
+```json
+{
+  "type": "toolCall",
+  "id": "call_1",
+  "name": "weather_get_forecast",
+  "arguments": { "city": "杭州" }
+}
+```
+
+### 3.2 把模型的调用转交给天气服务
+
+执行循环按照[第 03 篇](/posts/coding-agent-03-tools/)的流程查找工具、校验参数并经过执行前钩子，再调用桥接工具的 `execute`。这里查找的是 `weather_get_forecast`，传入的参数是 `{"city":"杭州"}`。桥接工具把调用交给 MCP 服务管理器，管理器找到 `weather` 当前可用的客户端，并调用它的 `callTool` 方法。
+
+客户端怎样把这次调用变成 MCP 请求？[`McpClient.callTool`](https://github.com/FishInSalt/ink/blob/main/src/mcp/client.ts) 的关键几行如下，省略了此前的连接状态检查和此后的结果整理：
+
+```ts
+// src/mcp/client.ts，McpClient.callTool 内的请求构造
+const result = (await this.request(
+  "tools/call",
+  { name, arguments: args },
+  this.options.callTimeoutMs ?? CALL_TIMEOUT_MS,
+  signal
+)) as McpCallResult;
+```
+
+对应这次天气查询，`name` 是服务端的原始工具名 `get_forecast`，`args` 是 `{"city":"杭州"}`。`request` 将它们放进 `tools/call` 请求，补上 JSON-RPC 请求编号，再交给传输层发送。
+
+请求报文可以是下面这样，数值编号仅作示意：
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 7,
+  "method": "tools/call",
+  "params": {
+    "name": "get_forecast",
+    "arguments": { "city": "杭州" }
+  }
+}
+```
+
+这里的 `7` 与 3.1 中的 `call_1` 用途不同：客户端用 `7` 将天气服务的响应对应到这条 MCP 请求，Ink 用 `call_1` 将工具结果对应到模型提出的那次调用。两个编号分别在 MCP 通信和 Agent 对话中使用，不要求相等。
+
+例如服务返回：
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 7,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "杭州明天：小雨，气温 18—23℃。"
+      }
+    ],
+    "isError": false
+  }
+}
+```
+
+客户端用响应中的 `7` 找到正在等待的那次请求，并把 `result` 交回 MCP 服务管理器。这样，杭州的天气结果就沿着刚才的调用路径回到了 Ink。
+
+### 3.3 把天气结果写回对话，再生成回答
+
+天气服务返回的预报放在 `result.content` 的文本块中，Ink 需要把这段文字转换为普通工具的 `output`。MCP 服务管理器调用桥接模块中的 `mapCallResult` 完成这一步。下面只节选本例的文本处理路径，其余结果处理已省略：
+
+```ts
+// src/mcp/bridge.ts，mapCallResult
+const texts: string[] = [];
+for (const block of result.content) {
+  if (block.type === "text" && typeof block.text === "string")
+    texts.push(block.text);
+}
+let output = texts.join("\n");
+return { output, isError: result.isError === true ? true : undefined };
+```
+
+这样，“杭州明天：小雨，气温 18—23℃”就成为了工具输出。执行循环把它关联到原来的 `call_1`，并在这轮工具执行结束后写回对话。下面节选写入历史的部分，其余运行控制已省略：
+
+```ts
+// src/core/loop.ts，runAgentLoop 内工具批次结束后的结果写入
+const toolResults: AgentMessage = { role: "toolResult", results };
+history.push(toolResults);
+onMessage?.(toolResults);
+```
+
+此时 `history` 中已经有用户的问题、模型发出的查询调用，以及服务返回的“杭州明天：小雨，气温 18—23℃”。循环下一次执行 `streamAssistant` 时会再次传入这份历史，模型便能根据查询结果回答“明天有小雨，出门建议带伞”。
+
+下面按时间顺序串起这一次查询。每一步标明谁向谁发送什么，重点看天气结果怎样经由 Agent 应用进入模型的回答：
+
+<McpToolFlow />
+
+图中第 1、2、5、6 步是 Agent 应用与模型之间的通信，第 3、4 步是 Agent 应用通过 MCP 与天气服务之间的通信。第 5 步把取得的天气结果交回模型，才有了第 6 步的带伞建议。这里，Function Calling 让模型表达要调用的工具和参数，MCP 则让 Agent 应用能向天气服务执行这次调用并取得结果。
+
+## 4. MCP 模块的异常处理
+
+接入天气服务和查询天气的过程中，异常可能出现在不同环节：读取 `.mcp.json` 时发现格式错误，连接或获取工具列表时服务没有响应，发起 `get_forecast` 调用时参数不符合要求，或者天气服务无法完成查询。请求发出后，还可能超时、被用户取消，或因连接断开而需要恢复。本节先说明不同错误怎样反馈，再讨论请求超时、用户中断，以及连接恢复与工具调用重试的处理。
+
+### 4.1 常见错误类型与反馈方式
+
+下面按天气服务的接入和调用过程，列出常见错误及 Ink 相应的反馈：
+
+| 失败位置         | 例子                                                               | Ink 当前怎样反馈                          |
+| ---------------- | ------------------------------------------------------------------ | ----------------------------------------- |
+| 配置发现         | 配置文件不是合法 JSON，或者某项配置格式错误                        | 提示并跳过对应文件或配置项，继续启动      |
+| 初始化或工具发现 | 进程无法启动，服务没有回答握手                                     | 服务标为 `failed`，记录原因，不加入新工具 |
+| Agent 参数检查   | `city` 应为城市名称字符串，模型却给出数字                          | 在发送 MCP 请求前返回参数错误             |
+| MCP 协议请求     | 服务返回 JSON-RPC `error`                                          | 客户端拒绝等待，桥接层转成错误工具结果    |
+| 工具业务执行     | 服务在 `result` 中返回 `isError: true`，说明找不到该城市的天气数据 | 保留服务的文本及错误标记，交回模型        |
+
+最后两种尤其容易混淆。一个 `tools/call` 请求可能成功送达、也成功收到了响应，但服务未能完成业务操作。此时错误位于工具结果中，而不是说连接一定坏了。
+
+桥接函数把抛出的异常转为 `isError: true`，让失败经过已有的工具结果路径进入对话。模型可以根据它修正城市名称、说明暂时查不到预报或选择其他步骤。不过，收到错误信息不代表模型总能自行修复服务的认证和配置问题。
+
+### 4.2 请求超时与用户中断的处理
+
+客户端发出编号为 `7` 的天气请求时，会在 `pending` 表里保存它的等待记录，包括 Promise 的完成函数、失败函数和超时定时器。正常收到响应后，客户端按编号找到记录，清理定时器和中断监听，再把结果交回。
+
+如果天气服务一直没有响应，客户端需要在设定的时限后结束等待。Ink 为初始化、列工具和调用工具设置了超时。下面节选 `request` 中创建定时器的部分，`timeoutMs` 是本次请求的等待时限；请求编号生成、等待记录登记和消息发送等代码已省略：
+
+```ts
+// src/mcp/client.ts，McpClient.request 内的超时处理
+const timer = setTimeout(() => {
+  const entry = this.deletePending(id);
+  if (entry !== undefined) {
+    entry.reject(new Error(`MCP "${method}" timed out after ${timeoutMs}ms`));
+  }
+}, timeoutMs);
+```
+
+以编号为 `7` 的天气请求为例，到期时，`deletePending` 会取出并移除仍在等待的那条记录，同时清理定时器和中断监听。随后，`entry.reject` 让这次调用以超时错误结束。如果记录已经不存在，就不再处理。
+
+用户中断则通过 `AbortSignal` 进入请求层，也使用 `deletePending` 清理等待记录。下面节选 `request` 中已经登记的请求收到中断时的回调；信号已提前中断的分支和监听器注册代码已省略：
+
+```ts
+// src/mcp/client.ts，McpClient.request 内的 onAbort
+const onAbort = () => {
+  const pendingEntry = this.deletePending(id);
+  if (pendingEntry === undefined) return;
+  this.notify("notifications/cancelled", {
+    requestId: id,
+    reason: "client aborted",
+  });
+  reject(new Error(`MCP "${method}" aborted`));
+};
+```
+
+这段代码先移除等待记录，再尽力发送取消通知，随后拒绝对应的 Promise。HTTP 传输还会中止本次 fetch；stdio 传输则继续保留进程，通过通知请服务停止这项工作。其他请求和后续调用不必因为单次取消就全部失去连接。
+
+当前实现的超时分支与主动取消并不完全相同：**超时会删除等待记录，但不会像上面的回调一样发送取消通知，也不会主动中止对应的 HTTP 请求。** 迟到的结果虽然不会再进入这次工具调用，服务端工作却可能仍在继续。
+
+取消或超时之后，如果服务才返回编号为 `7` 的响应，客户端会发现对应的等待记录已经不存在，因而忽略它，不会重新完成一次已经失败的调用。
+
+因此，用户中断后，Ink 停止等待这次天气查询，并不表示天气服务也已经停止工作：服务可能尚未处理取消通知，也可能已经完成查询。Ink 能确认的是本地调用已中断，不能仅凭这个状态判断服务端的执行进度。
+
+### 4.3 连接恢复与工具调用重试
+
+Ink 针对不同阶段安排了两种恢复入口。
+
+**启动时就失败的服务，在后续运行开始时尝试连接。** 因为它还没有注册工具，无法等待模型调用它来触发恢复。这里有冷却时间和连续失败次数限制，也不是后台无限重试；初次失败就计入失败次数。
+
+**已经注册过工具的服务，连接断开后保留原工具入口。** 下一次执行仍通过 MCP 服务管理器寻找连接。如果满足重连条件，就创建新客户端，再次初始化和发现工具。多个调用同时请求重连时，会等待同一个重连 Promise，避免各自建立一条连接。
+
+还存在一种竞态：检查时连接仍然可用，请求发出以后它才断开。MCP 服务管理器在调用外面再包了一层恢复：
+
+```ts
+// src/mcp/manager.ts，McpManager.callTool
+// 已查找并确认 state 存在；省略未知服务名的错误分支。
+let client = await this.ensureClient(state);
+try {
+  return mapCallResult(await client.callTool(toolName, args, signal));
+} catch (err) {
+  if (!(err instanceof McpConnectionError) || signal.aborted || this.closed)
+    throw err;
+  client = await this.ensureClient(state, {
+    bypassCooldown: err instanceof McpSessionExpiredError,
+  });
+  return mapCallResult(await client.callTool(toolName, args, signal));
+}
+```
+
+普通超时和主动取消不会在这里自动重试。符合连接错误类型、运行未取消且 MCP 服务管理器未关闭时，才再获取客户端，并把同一组参数发送一次；第二次失败会继续交给桥接层处理，不在这个分支里无限循环。
+
+`ensureClient` 也不意味着一定重连：连接仍可用时，它会直接返回现有客户端；连接已失效时，才按冷却条件尝试建立新连接。比如当前 HTTP 传输把普通非成功状态码也包装为 `McpConnectionError`，但不一定关闭连接，所以 401、403 或 5xx 可能在原连接上再请求一次。这不能修复错误凭据。
+
+HTTP 连接还可能涉及服务会话。天气服务如果通过 `Mcp-Session-Id` 响应头给出会话 ID，Ink 会保存它，并在后续请求中携带它；如果服务没有分配会话 ID，后续请求就不携带该头。它标识一段服务会话，与 3.2 中区分单次请求的 JSON-RPC 编号 `7` 不同。初始化后的 HTTP 请求还会带上 `MCP-Protocol-Version`，说明本次采用的协议版本。
+
+会话过期是一个特殊分支：已有会话 ID 的 HTTP 请求收到 404，且响应未携带 `Mcp-Session-Id` 头时，传输将其标为 `McpSessionExpiredError`。MCP 服务管理器可以跳过一般重连的冷却时间，重新初始化，再尝试这次调用。否则刚建好就失效的会话，可能还要等冷却结束才能恢复。
+
+## 5. 从服务接入到模型回答
+
+回到“明天出门要不要带伞”的任务：服务配置给出连接入口，初始化后发现 `get_forecast`，桥接层生成 `weather_get_forecast`，MCP 服务管理器在合适的运行时刻加入工具表。工具说明随任务交给模型；模型选择调用它之后，请求经过 MCP 客户端送达天气服务，返回的天气结果再写入对话历史，成为模型给出出行建议的依据。
+
+沿着这条流程，MCP 接入就可以拆成可检查的几步：**配置是否采用、连接是否建立、工具是否注册、工具说明是否交给模型、请求是否送出、结果是否写回对话。** 每一步都有自己的状态和失败位置，排查时也就不必把所有问题都归为“模型没有调用工具”。

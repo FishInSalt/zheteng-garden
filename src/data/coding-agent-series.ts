@@ -94,8 +94,9 @@ export const codingAgentChapters = [
   },
   {
     number: "12",
-    title: "MCP——怎样接入外部服务提供的工具",
-    question: "怎样连接 MCP 服务、发现和调用工具，并处理连接与调用失败？",
+    title: "MCP——外部工具接入的统一协议",
+    question:
+      "MCP 统一了哪些约定，为什么需要这些约定，Agent 又怎样发现和调用外部工具？",
     postId: "coding-agent-12-mcp",
   },
   {

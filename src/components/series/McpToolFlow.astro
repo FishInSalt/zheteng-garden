@@ -1,0 +1,169 @@
+---
+import "./series-visual.css";
+---
+
+<figure
+  class="mcp-flow series-visual not-prose"
+  aria-labelledby="mcp-flow-title"
+>
+  <figcaption id="mcp-flow-title">
+    一次天气查询：结果怎样成为回答的依据
+  </figcaption>
+  <ol class="steps" role="list">
+    <li>
+      <span class="step-number" aria-hidden="true">1</span>
+      <div class="step-content">
+        <p class="route">
+          <strong class="agent">Agent 应用</strong>
+          <span role="img" aria-label="发送给">→</span>
+          <strong>模型</strong>
+        </p>
+        <p>
+          提交“杭州明天要带伞吗？”和 <code>weather_get_forecast</code> 的工具说明。
+        </p>
+      </div>
+    </li>
+    <li>
+      <span class="step-number" aria-hidden="true">2</span>
+      <div class="step-content">
+        <p class="route">
+          <strong>模型</strong>
+          <span role="img" aria-label="发送给">→</span>
+          <strong class="agent">Agent 应用</strong>
+        </p>
+        <p>
+          选择调用 <code>weather_get_forecast</code>，参数 <code>city</code> 为“杭州”。
+        </p>
+      </div>
+    </li>
+    <li class="mcp-step">
+      <span class="step-number" aria-hidden="true">3</span>
+      <div class="step-content">
+        <p class="route">
+          <strong class="agent">Agent 应用</strong>
+          <span role="img" aria-label="发送给">→</span>
+          <strong class="server">weather 服务</strong>
+        </p>
+        <p>通过 MCP 调用 <code>get_forecast</code>，查询杭州明天的天气。</p>
+      </div>
+    </li>
+    <li class="mcp-step">
+      <span class="step-number" aria-hidden="true">4</span>
+      <div class="step-content">
+        <p class="route">
+          <strong class="server">weather 服务</strong>
+          <span role="img" aria-label="发送给">→</span>
+          <strong class="agent">Agent 应用</strong>
+        </p>
+        <p>返回“杭州明天：小雨，气温 18—23℃”。</p>
+      </div>
+    </li>
+    <li>
+      <span class="step-number" aria-hidden="true">5</span>
+      <div class="step-content">
+        <p class="route">
+          <strong class="agent">Agent 应用</strong>
+          <span role="img" aria-label="发送给">→</span>
+          <strong>模型</strong>
+        </p>
+        <p>先将工具结果写入历史，再提交包含这份天气预报的对话。</p>
+      </div>
+    </li>
+    <li class="answer-step">
+      <span class="step-number" aria-hidden="true">6</span>
+      <div class="step-content">
+        <p class="route">
+          <strong>模型</strong>
+          <span role="img" aria-label="发送给">→</span>
+          <strong class="agent">Agent 应用</strong>
+        </p>
+        <p>根据“小雨”预报生成回答：“明天有小雨，出门建议带伞。”</p>
+      </div>
+    </li>
+  </ol>
+  <p class="caption">
+    图中的 Agent 应用以 Ink 为例，工具和天气数据均为教学示例。
+  </p>
+</figure>
+
+<style>
+  .mcp-flow {
+    margin: 2rem 0;
+    padding: clamp(0.8rem, 3vw, 1.25rem);
+    border: 1px solid var(--series-rule);
+    border-radius: 0.8rem;
+    background: var(--series-paper);
+    color: var(--series-ink);
+    overflow-wrap: anywhere;
+  }
+  figcaption {
+    margin-bottom: 1rem;
+    font-weight: 700;
+    line-height: 1.6;
+  }
+  .steps {
+    display: grid;
+    gap: 0.65rem;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+  li {
+    display: grid;
+    grid-template-columns: 1.65rem minmax(0, 1fr);
+    gap: 0.75rem;
+    padding: 0.85rem;
+    border: 1px solid var(--series-rule);
+    border-radius: 0.5rem;
+    background: var(--series-canvas);
+  }
+  .step-number {
+    display: grid;
+    place-items: center;
+    width: 1.65rem;
+    height: 1.65rem;
+    border-radius: 50%;
+    background: var(--series-paper);
+    color: var(--series-blue);
+    font-size: 0.85rem;
+    font-weight: 700;
+  }
+  .step-content {
+    min-width: 0;
+  }
+  p {
+    margin: 0.4rem 0 0;
+    font-size: 0.9rem;
+    line-height: 1.7;
+  }
+  .route {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 0;
+  }
+  .route > span {
+    color: var(--series-secondary);
+  }
+  .agent {
+    color: var(--series-blue);
+  }
+  .server,
+  .mcp-step .step-number {
+    color: var(--series-feedback);
+  }
+  .answer-step {
+    border-color: var(--series-blue);
+    background: var(--series-blue-wash);
+  }
+  code {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  .caption {
+    margin-top: 1rem;
+    color: var(--series-secondary);
+    font-size: 0.8rem;
+  }
+</style>
