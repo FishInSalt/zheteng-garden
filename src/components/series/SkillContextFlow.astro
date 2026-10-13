@@ -1,0 +1,215 @@
+---
+import "./series-visual.css";
+const stages = [
+  {
+    title: "读取正文前：上下文中有 Skill 清单",
+    action:
+      "用户要求生成提交信息，模型根据清单判断 commit-message 适合这项任务。",
+    history: [["user", "根据这次代码改动，写一条 Git 提交信息。"]],
+    note: "模型知道 Skill 的用途和文件位置，还没有看到具体操作要求。",
+  },
+  {
+    title: "读取正文后：具体要求进入上下文",
+    action: "Agent 执行 read，把说明文件的内容作为工具结果写入 history。",
+    history: [
+      ["assistant", "调用 read：commit-message/SKILL.md"],
+      [
+        "toolResult",
+        "先查看代码差异；标题用“类型: 一句话说明”，修复用 fix、新功能用 feat；用中文说明具体改动。",
+      ],
+    ],
+    note: "下一次调用模型时，这些操作要求随历史进入上下文，模型可以据此继续工作。",
+  },
+];
+---
+
+<figure
+  class="skill-context series-visual not-prose"
+  aria-labelledby="skill-context-title"
+>
+  <figcaption id="skill-context-title">
+    读取 Skill 正文前后，模型上下文有什么变化？
+  </figcaption>
+  <p class="figure-intro">
+    沿用生成提交信息的教学示例，只展开与 Skill 有关的上下文。
+  </p>
+  <ol>
+    {
+      stages.map((stage, index) => (
+        <li>
+          <div class="stage-heading">
+            <span class="step" aria-hidden="true">
+              {index + 1}
+            </span>
+            <strong>{stage.title}</strong>
+          </div>
+          <p class="action">{stage.action}</p>
+          <div class="context-fields">
+            <div class="field system-field">
+              <div class="field-label">
+                <>
+                  <code>system</code>
+                  <span>可用 Skill 清单</span>
+                </>
+              </div>
+              <p>
+                <b>commit-message</b> · 按团队规范生成中文 Git 提交信息 ·
+                SKILL.md 的绝对路径
+              </p>
+            </div>
+            <div class="field message-field">
+              <div class="field-label">
+                <>
+                  <code>messages</code>
+                  <span>{index === 0 ? "用户任务" : "历史中新增的内容"}</span>
+                </>
+              </div>
+              <ul class="messages">
+                {stage.history.map(([role, content]) => (
+                  <li>
+                    <code>{role}</code>
+                    <span>{content}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </div>
+          <p class="stage-note">{stage.note}</p>
+        </li>
+      ))
+    }
+  </ol>
+  <p class="caption">
+    读取后的状态只列新增消息，原来的用户任务仍在历史中。正文通过工具结果加入
+    messages，system 中保留 Skill 清单。图中文字为内容摘要，路径省略了项目目录。
+  </p>
+</figure>
+
+<style>
+  .skill-context {
+    margin: 2rem 0;
+    padding: clamp(0.9rem, 2vw, 1.25rem);
+    border: 1px solid var(--series-rule);
+    border-radius: 0.8rem;
+    background: var(--series-paper);
+    color: var(--series-ink);
+    font-size: 0.9rem;
+    line-height: 1.7;
+    container-type: inline-size;
+  }
+  figcaption {
+    font-weight: 700;
+    font-size: 1rem;
+  }
+  .figure-intro {
+    margin: 0.4rem 0 1.1rem;
+    color: var(--series-secondary);
+  }
+  ol {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  ol > li {
+    margin: 0;
+    padding: 1rem 0;
+    border-top: 1px solid var(--series-rule);
+  }
+  .stage-heading {
+    display: flex;
+    align-items: baseline;
+    gap: 0.65rem;
+  }
+  .step {
+    display: inline-grid;
+    place-items: center;
+    flex: 0 0 1.55rem;
+    height: 1.55rem;
+    border-radius: 50%;
+    color: var(--series-blue);
+    background: var(--series-blue-wash);
+    font-size: 0.8rem;
+    font-weight: 700;
+  }
+  .action {
+    margin: 0.5rem 0 0.8rem;
+  }
+  .context-fields {
+    display: grid;
+    gap: 0.55rem;
+  }
+  .field {
+    min-width: 0;
+    padding: 0.7rem 0.85rem;
+    border: 1px solid var(--series-rule);
+    border-radius: 0.4rem;
+  }
+  .system-field {
+    background: var(--series-blue-wash);
+    border-color: var(--series-blue);
+  }
+  .message-field {
+    border-left: 3px solid var(--series-feedback);
+  }
+  .field-label {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 0.65rem;
+  }
+  .field-label span {
+    color: var(--series-secondary);
+    font-size: 0.75rem;
+  }
+  .field-label code {
+    font-weight: 700;
+  }
+  .field p {
+    margin: 0.3rem 0 0;
+  }
+  .messages {
+    list-style: none;
+    padding: 0;
+    margin: 0.3rem 0 0;
+  }
+  .messages li {
+    display: grid;
+    grid-template-columns: 6.5rem minmax(0, 1fr);
+    gap: 0.6rem;
+    margin: 0;
+    padding: 0.35rem 0;
+  }
+  .messages li + li {
+    border-top: 1px dashed var(--series-rule);
+  }
+  .messages code {
+    color: var(--series-feedback);
+  }
+  code {
+    font-size: 0.8rem;
+    font-family: var(--font-mono, monospace);
+  }
+  .stage-note {
+    color: var(--series-secondary);
+    margin: 0.6rem 0 0;
+    font-size: 0.8rem;
+  }
+  .caption {
+    color: var(--series-secondary);
+    margin: 0.25rem 0 0;
+    padding-top: 0.9rem;
+    border-top: 1px solid var(--series-rule);
+    font-size: 0.8rem;
+  }
+  p,
+  strong,
+  .messages span {
+    overflow-wrap: anywhere;
+  }
+  @container (max-width: 380px) {
+    .messages li {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 0.1rem;
+    }
+  }
+</style>

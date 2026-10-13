@@ -1,0 +1,255 @@
+---
+author: 折腾客
+pubDatetime: 2026-10-13T09:40:41Z
+title: "Coding Agent 原理与实践 11：Skills——Agent 怎样使用任务相关的“技能”？"
+featured: false
+draft: false
+tags:
+  - Coding Agent
+  - ink
+  - Agent 原理
+description: 以生成 Git 提交信息为例，解释 Ink 怎样准备可用 Skill 清单、将清单提供给模型、按需读取正文与参考资料，以及用户指定 Skill 时怎样将正文加入上下文。
+---
+
+import SkillContextFlow from "@/components/series/SkillContextFlow.astro";
+
+## 1. 什么是 Skill，为什么需要按需加载？
+
+**Skill（技能）是一组围绕特定任务编写的说明和配套资源。** 它告诉 Agent 这类任务应该怎样做，例如遵循哪些要求、采用什么步骤、参考哪份模板。按照 [Agent Skills 的格式约定](https://agentskills.io/specification)，一个 Skill 以 `SKILL.md` 为入口，还可以附带参考文档、脚本和模板。
+
+Agent Skills 由 Anthropic 于 **2025 年 10 月**推出，随后在同年 **12 月**作为开放标准发布，便于采用该标准的不同 Agent 复用 Skill。它约定了说明文件和配套资源怎样组织，各个 Agent 则需要实现相应的发现与加载功能。[官方介绍](https://www.anthropic.com/engineering/equipping-agents-for-the-real-world-with-agent-skills)
+
+例如，我们让 Agent：“根据这次代码改动，写一条 Git 提交信息。”假设团队有这样的要求：
+
+- 先查看代码差异，确认这次实际改了什么。
+- 标题采用“类型: 一句话说明”的格式，修复问题用 `fix`，新增功能用 `feat`。
+- 用中文说明具体改动，避免只写“更新代码”这样含糊的描述。
+
+这些步骤、格式要求和示例，就可以写成一个**生成提交信息的 Skill**。Agent 处理这项任务时，先读取它，再查看改动、按规范生成提交信息，例如：`fix: 修复登录失败时未显示错误提示的问题`。用户不用每次都重新解释团队规范。
+
+这些要求也可以写进 `AGENTS.md`。但其中的内容会作为项目约定提供给模型，即使当前任务用不上提交信息的规范，也会带着这部分内容。如果把代码审查、生成文档等任务的详细说明也都放进去，无关内容就会越来越多。
+
+Agent 中的 **Skill 管理模块**将 **“这个 Skill 适合做什么”** 和 **“具体应该怎样做”** 分开提供给模型，让模型先根据用途选择，再读取详细说明。沿用生成提交信息的例子，具体过程如下：
+
+1. **Agent 启动时，先准备可用 Skill 的清单。** 清单包含每个 Skill 的名称、用途说明和文件位置。调用模型时，Agent 会把这份清单提供给它，暂时不提供各个 Skill 的完整正文。例如，其中一项说明“这个 Skill 用于按团队规范生成 Git 提交信息”，具体规范留到使用时再读取。
+2. **用到某个 Skill 时，再读取具体做法。** 模型收到生成提交信息的任务后，可以根据用途说明选中这个 Skill，再请求读取它的 `SKILL.md`。这时，标题格式、类型选择规则等详细要求才进入模型的上下文。
+3. **需要更多细节时，再读取配套资料。** 如果正文引用了另一份文件，里面有提交信息的模板和更多示例，Agent 可以在需要时继续读取。
+
+这种**按任务需要，逐步把更多细节加入模型上下文**的方式，叫作[**渐进式披露（progressive disclosure）**](https://agentskills.io/specification#progressive-disclosure)。下面看看 Ink 的 Skill 管理模块怎样实现这个过程。
+
+## 2. Agent 怎样发现并使用 Skill？
+
+第一节介绍了“先提供用途，需要时再读取做法”的思路。下面沿着同一个提交信息任务，先看可用 Skill 怎样通过提示词告诉模型，再看具体要求怎样进入模型上下文、指导后续工作。
+
+我们把这个教学示例命名为 `commit-message`。示例中的说明文件由本文编写，管理模块的代码节选自 Ink 的 [`skills.ts`](https://github.com/FishInSalt/ink/blob/main/src/core/skills.ts) 及其调用处。想看仓库提供的现成 Skill，也可以参考用于记录项目进展的 [`ledger`](https://github.com/FishInSalt/ink/tree/main/examples/skills/ledger)。
+
+### 2.1 怎样把可用 Skill 告诉模型？
+
+启动时，Ink 的 `loadSkills` 会从约定或用户指定的路径查找 Skill。常用路径包括项目的 `.ink/skills/` 和用户的 `~/.ink/skills/`；也可以通过 `--skill` 指定路径，Ink 还兼容 `.agents/skills/`。
+
+> 项目路径中的 Skill 需要先通过[项目信任检查](/posts/coding-agent-08-trust/)。
+
+沿用生成提交信息的例子，假设用户已经把它放在项目的 `.ink/skills/commit-message/` 文件夹中：
+
+```text
+.ink/skills/commit-message/
+├── SKILL.md
+└── references/
+    └── examples.md
+```
+
+先看这个例子的完整 `SKILL.md`，名称、用途说明和具体操作要求都写在这份文件里：
+
+```markdown
+---
+name: commit-message
+description: 根据代码改动，按团队规范生成中文 Git 提交信息。
+---
+
+# 生成 Git 提交信息
+
+1. 先查看代码差异，确认这次实际改了什么。
+2. 标题采用“类型: 一句话说明”的格式；修复问题用 fix，新增功能用 feat。
+3. 用中文说明具体改动，避免只写“更新代码”。
+
+需要参考提交信息的模板和示例时，读取 references/examples.md。
+```
+
+这份文件分成两部分：
+
+- **名称和用途说明（元信息）**：两个 `---` 分隔符之间的 `name` 和 `description`，分别说明“这个 Skill 叫什么”和“适合做什么”。这部分采用 YAML 格式，帮助模型判断是否需要使用这个 Skill。
+- **具体操作要求（正文）**：第二个 `---` 分隔符之后的全部内容，包括“生成 Git 提交信息”的标题、三个步骤，以及读取参考示例的说明。它告诉模型“使用这个 Skill 时，应该怎样完成任务”。
+
+找到文件后，`loadSkillFromFile` 读取它，`parseSkillFile` 将上面这两部分分开。Ink 从元信息中取得名称和用途说明，再记录文件位置，保存一份 Skill 记录：
+
+```ts
+// 文件：src/core/skills.ts
+// 所在函数：loadSkillFromFile
+// 省略变量声明和错误处理。
+raw = readFileSync(filePath, "utf8"); // 读取文件
+parsed = parseSkillFile(raw); // 分开名称和用途说明（元信息）与具体操作要求（正文）
+
+const { frontmatter } = parsed; // 两个 --- 分隔符之间的 name、description 等字段
+// 从 frontmatter 取得名称 name，校验用途说明后得到 descriptionText；过程省略。
+
+return {
+  skill: {
+    name,
+    description: descriptionText,
+    filePath, // SKILL.md 的绝对路径
+    // 省略配套资料的基准目录、来源及可见性配置。
+  },
+  // 省略诊断信息。
+};
+```
+
+每找到一个有效的 Skill 文件，Ink 就得到一份这样的记录。`loadSkills` 收集这些记录，供后续生成清单；此时记录的是名称、用途说明和文件位置，不包含“先查看代码差异”等正文中的操作要求。
+
+接下来，Ink 将这些记录整理成可用 Skill 清单，加入系统提示词（`system`）。
+
+[`runner.ts`](https://github.com/FishInSalt/ink/blob/main/src/runner.ts) 组装系统指令时，通过 `formatSkillsForPrompt` 将前面准备的 Skill 记录转换成文字清单：
+
+```ts
+// 文件：src/runner.ts
+// 所在方法：RunnerImpl.assembleSystem，Skill 清单组装部分。
+if (
+  this.options.skills !== undefined &&
+  this.tools.some(t => t.name === "read")
+) {
+  system += formatSkillsForPrompt(this.options.skills);
+}
+```
+
+这里要求存在 `read` 工具，因为模型选中 Skill 后还需要读取文件。`formatSkillsForPrompt` 除了列出名称、用途说明和位置，还会告诉模型：任务与用途说明匹配时，使用 `read` 读取对应文件。
+
+假设项目位于 `/workspace/app`，加入 `system` 的内容如下；这里省略了配套资料相对路径的处理说明，以及其他系统指令：
+
+```xml
+Use the read tool to load a skill's file when the task matches its description.
+
+<available_skills>
+  <skill>
+    <name>commit-message</name>
+    <description>根据代码改动，按团队规范生成中文 Git 提交信息。</description>
+    <location>/workspace/app/.ink/skills/commit-message/SKILL.md</location>
+  </skill>
+</available_skills>
+```
+
+调用模型时，这段提示词随系统指令一同发送。模型看到用户要“根据这次改动写提交信息”，又看到 `commit-message` 的用途说明，就有了选择它的依据；`location` 告诉它去哪里读取具体规范，清单前的指令则告诉它通过 `read` 取得文件内容。
+
+**选择 Skill 的是模型，Skill 管理模块负责提供清单和读取入口。** Ink 没有另外用关键词匹配器决定本次必须加载哪一个。清单本身也占用上下文，只是完整正文和配套资料暂时没有加入。
+
+### 2.2 Skill 正文怎样进入模型上下文，指导后续工作？
+
+现在，可用 Skill 的名称、用途说明和文件位置已经进入模型上下文。模型因此知道 `commit-message` 适合生成提交信息，但 `SKILL.md` 正文中的标题格式、类型选择等具体要求，还没有进入上下文。
+
+模型选中 Skill 后，会请求 `read` 工具读取对应的 `SKILL.md`。Ink 将读取结果加入对话历史；下一次调用模型时，Skill 正文就随历史进入上下文，模型能够据此继续工作。
+
+下面对照读取正文前后的模型上下文：
+
+<SkillContextFlow />
+
+这些要求会给模型后续工作提供依据。例如，正文要求“先查看代码差异”，模型可以提出 `bash` 调用，运行 `git diff` 查看改动；正文规定修复问题用 `fix`、用中文说明，模型就可以据此组织提交信息。假设本次改动修复了登录失败时不显示提示的问题，生成结果可以是：`fix: 修复登录失败时未显示错误提示的问题`。
+
+### 2.3 用户指定 Skill 时，正文怎样进入上下文？
+
+前一小节由模型根据清单选择 Skill。如果用户已经确定要使用 `commit-message`，可以在 Ink 的交互界面输入：
+
+```text
+/skill:commit-message 根据这次代码改动，写一条 Git 提交信息。
+```
+
+Ink 收到这个命令后，会读取该 Skill 的正文，将它放在本次任务要求之前，组合成一条用户消息。模型处理这次任务时，就能直接看到具体操作要求，不必先根据清单选择、再请求读取正文。
+
+命令处理函数通过 `expandSkillBlock` 生成这条消息。传入的 `skill` 是启动时保存的 Skill 记录，`args` 是命令后面的任务要求，也就是“根据这次代码改动，写一条 Git 提交信息”。核心处理如下：
+
+```ts
+// 文件：src/core/skills.ts
+// 所在函数：expandSkillBlock
+const content = readFileSync(skill.filePath, "utf8");
+const body = parseSkillFile(content).body.trim(); // 取得第二个 --- 分隔符之后的正文
+
+// 在正文外加上 Skill 名称、文件位置及参考资料路径说明。
+const block =
+  `<skill name="${skill.name}" location="${skill.filePath}">\n` +
+  `References are relative to ${skill.baseDir}.\n\n` +
+  `${body}\n</skill>`;
+
+const trimmedArgs = args.trim();
+return trimmedArgs === "" ? block : `${block}\n\n${trimmedArgs}`;
+```
+
+命令处理函数将返回的文本作为用户消息提交。沿用前面的 Skill 文件，消息内容如下：
+
+```text
+<skill name="commit-message" location="/workspace/app/.ink/skills/commit-message/SKILL.md">
+References are relative to /workspace/app/.ink/skills/commit-message.
+
+# 生成 Git 提交信息
+
+1. 先查看代码差异，确认这次实际改了什么。
+2. 标题采用“类型: 一句话说明”的格式；修复问题用 fix，新增功能用 feat。
+3. 用中文说明具体改动，避免只写“更新代码”。
+
+需要参考提交信息的模板和示例时，读取 references/examples.md。
+</skill>
+
+根据这次代码改动，写一条 Git 提交信息。
+```
+
+这条消息进入对话历史后，Skill 正文与任务要求会一同加入本次模型调用的 `messages`。
+
+两种使用方式都读取 `SKILL.md`，区别在于正文以哪种消息进入上下文：
+
+| 使用方式                              | 正文以哪种消息进入上下文               |
+| ------------------------------------- | -------------------------------------- |
+| 模型根据清单选择                      | 文件读取的工具结果消息（`toolResult`） |
+| 用户通过 `/skill:commit-message` 指定 | 包含正文与任务要求的用户消息（`user`） |
+
+## 3. Skill 为什么可能没有按预期生效？
+
+### 3.1 为什么 Skill 没有出现在清单中？
+
+如果文件已经放好了，模型却看不到这个 Skill，可以沿清单的准备过程检查：
+
+- **是否被发现。** 检查文件是否放在扫描范围内。本例使用项目的 `.ink/skills/` 文件夹，还需要项目通过信任检查。
+- **元信息是否有效。** `SKILL.md` 缺少非空的 `description`，或 YAML 解析失败时，Ink 会警告并跳过它。
+- **是否与其他 Skill 重名。** Ink 保留先加载的同名 Skill，并提示冲突。显式路径先于项目路径，项目路径先于用户路径，最后保留的可能是另一份同名文件。
+- **是否允许向模型展示。** 设置 `disable-model-invocation: true` 会将 Skill 从模型可见的清单中移除；可用工具中没有 `read` 时，当前实现也不会提供 Skill 清单。
+
+`disable-model-invocation` 适合只希望用户主动调用的 Skill，对应的 `/skill:名称` 命令仍可保留。它控制清单展示，不改变文件访问权限。
+
+### 3.2 清单里有了，模型为什么仍没有选中？
+
+模型根据用途说明判断 Skill 与任务是否相关。如果 `description` 只写“处理提交”，就不如“根据代码改动，按团队规范生成中文 Git 提交信息”明确。
+
+用途说明写清楚了，也不保证模型每次都会选中它。已经确定要使用哪个 Skill 时，可以通过 `/skill:名称` 指定；命令成功读取正文并提交消息后，正文会直接进入上下文。模型能否正确完成正文要求的步骤，还取决于模型、工具和任务条件。
+
+### 3.3 读取或调用失败时，怎样处理？
+
+清单记录了文件位置，但启动后文件仍可能发生变化。如果 `SKILL.md` 或配套资料被删除、变得不可读，两条使用路径会在不同位置收到错误：
+
+| 发生位置                              | 当前处理                                                   |
+| ------------------------------------- | ---------------------------------------------------------- |
+| 模型调用 `read` 读取 Skill 或配套资料 | 读取失败作为工具错误交回模型，模型可以据此调整后续操作。   |
+| 用户通过 `/skill:名称` 读取正文       | 命令处理函数捕获错误并向用户显示，本次不会向模型提交消息。 |
+
+第二条路径的错误处理，在 2.3 节介绍的命令处理函数中，位于调用 `expandSkillBlock` 的外层：
+
+```ts
+// 文件：src/core/skills.ts
+// 所在函数：buildSkillCommands，命令 run 回调的 catch 分支。
+catch (err) {
+  const message = err instanceof Error ? err.message.split("\n")[0] : "failed to read";
+  ctx.renderer.error(`ink: /${name} failed to read ${skill.filePath}: ${message}`);
+}
+```
+
+另外，Ink 当前不允许在 Agent 运行尚未结束时提交 Skill 命令：命令会被拒绝，用户需要等当前运行结束后重新提交。
+
+## 4. Skill 怎样改变 Agent 的工作方式？
+
+回到生成提交信息的任务：Skill 管理模块先提供清单，模型或用户选中 `commit-message`，详细规范和所需示例再进入上下文。Agent 随后用已有工具查看改动，按规范生成提交信息。**渐进式披露让模型先知道有哪些 Skill 可用，再按任务需要取得细节。**
+
+Skill 补充的是做法和资料，所需的执行能力仍由工具提供。下一篇 MCP 将继续讨论，怎样把外部服务提供的工具接入 Agent。
