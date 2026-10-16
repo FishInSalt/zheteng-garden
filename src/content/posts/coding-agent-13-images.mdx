@@ -1,0 +1,728 @@
+---
+author: 折腾客
+pubDatetime: 2026-10-16T10:17:03Z
+title: "Coding Agent 原理与实践 13：图片输入——怎样把图片交给模型"
+featured: false
+draft: false
+tags:
+  - Coding Agent
+  - ink
+  - Agent 原理
+description: 从界面开发中对视觉信息的需求出发，解释 Coding Agent 怎样把本地图片带入模型上下文，再沿着截图的读取、处理、请求转换和历史保存，分析 Ink 的实现与限制。
+---
+
+import ImageInputFlow from "@/components/series/ImageInputFlow.astro";
+
+## 1. Coding Agent 为什么需要图片输入？
+
+前面的章节主要围绕文字信息展开：用户用文字描述任务，Agent 读取代码和文档，执行命令，再根据工具返回的文字结果继续工作。对于编译错误、测试失败等问题，这些信息通常能提供明确的排查线索。
+
+但在界面开发中，我们还会遇到另一类信息：页面的实际显示效果、设计稿中的布局，以及元素之间的位置关系。例如，按钮遮住了错误提示，单靠“页面显示不对”很难说清具体发生了什么。把截图交给 Agent，可以让支持图片输入的模型结合画面与文字要求理解问题，也减少用户逐项描述视觉细节的负担。
+
+图片输入因此成为连接视觉信息与代码任务的一种方式。截图呈现页面上的现象，代码则帮助解释这些现象怎样产生，Agent 需要结合两者判断应该修改哪里。
+
+假设我们正在调整一个登录页面：提交失败后，错误提示被登录按钮挡住了。我们截下页面，在 Ink 的输入框里粘贴，再补一句：
+
+> 看一下这张截图，解释错误提示为什么被按钮遮住，再结合代码修复布局。
+
+要让 Agent 使用这张截图，除了选择支持图片输入的模型，还需要由软件把本地图片读取出来，整理成模型能够接收的内容。本篇就沿着这张截图，解释图片怎样进入对话、经过处理并随请求发送，以及保存会话和压缩上下文时，图片又会被怎样处理。
+
+## 2. 从粘贴图片到对话消息
+
+回到登录页面的例子：在 Ink 的交互界面中按 `Ctrl+V` 粘贴截图，再提交修复要求，这张截图会怎样从剪贴板进入对话消息？下面先看输入框怎样接收图片，再看 `read` 怎样把本地文件转换为消息里的图片内容块。
+
+### 2.1 输入框接收的是图片数据，还是图片路径？
+
+**Ink 的输入框只处理文本。** 使用 `Ctrl+V` 粘贴图片时，写入输入框的是图片的本地路径。提交后，模型可以根据这个路径请求调用 `read`，由 Ink 读取图片数据并交给模型分析。图片路径有两种来源：
+
+- **已有图片文件**：用户可以直接把文件路径写入输入框，也可以在文件管理器中复制图片文件，再回到 Ink 按 **`Ctrl+V`**。Ink 会从剪贴板中读取文件的本地路径，并将其插入输入框。
+- **剪贴板中的图片数据**：Ink 从剪贴板读取图片数据，保存为临时文件，再把临时文件的路径插入输入框。
+
+截图如果已经保存为本地文件，并通过文件路径提供，也属于第一种情况。下面先看 `Ctrl+V` 怎样处理不同的剪贴板内容，再以登录页面截图为例，展开图片数据的读取与保存过程。
+
+先看粘贴动作怎样被触发。输入监听器检测到 `Ctrl+V`，并且没有选择菜单占用输入时，就调用 `handlePasteImage`：
+
+```ts
+// src/repl/shell.ts
+// TuiShell 输入监听回调中的 Ctrl+V 分支。
+if (this.selector === null && matchesKey(data, "ctrl+v")) {
+  void this.handlePasteImage();
+  return { consume: true };
+}
+```
+
+`consume: true` 表示这个按键已经被处理，不再继续交给编辑器。虽然函数名是 **`handlePasteImage`**，它也支持普通文本的粘贴。下面的节选保留了文件路径、图片数据和文字三个分支：
+
+```ts
+// src/repl/shell.ts
+// TuiShell.handlePasteImage：三种粘贴内容的处理顺序。
+// 省略编辑器存在性检查和外层异常捕获。
+// 1. 先尝试取得已有文件的路径。
+const readPaths = this.options.pasteFilePaths ?? readClipboardFilePaths;
+let filePaths: string[] | null | undefined;
+try {
+  filePaths = await readPaths();
+} catch {
+  return; // 文件路径读取出错，结束本次粘贴。
+}
+if (filePaths !== null && filePaths !== undefined && filePaths.length > 0) {
+  // 路径含控制字符时，放弃本次粘贴。
+  if (filePaths.some(p => /\p{Cc}/u.test(p))) return;
+  this.editor.insertTextAtCursor(this.composePathInsert(filePaths));
+  this.tui?.requestRender();
+  return;
+}
+
+// 2. 没有文件路径，再尝试读取图片数据。
+const reader = this.options.pasteImage ?? readClipboardImage;
+const image = await reader();
+if (image) {
+  this.editor.insertTextAtCursor(writeClipboardImageToTmp(image));
+  this.tui?.requestRender();
+  return;
+}
+
+// 3. 没有图片，再尝试读取普通文本。
+const text = await (this.options.pasteText ?? readClipboardTextViaPbcopy)();
+if (text) {
+  this.editor.insertTextAtCursor(text);
+  this.tui?.requestRender();
+}
+```
+
+这段代码按 **文件路径 → 图片数据 → 普通文本** 的顺序尝试读取剪贴板。复制已有图片文件时，Ink 直接将原文件路径插入输入框，无需创建临时图片文件。文件路径或图片分支处理成功后都会 `return`，结束本次粘贴；没有取得相应内容时，才继续尝试下一种。因此，只复制普通文字时，Ink 也会先尝试读取文件路径和图片数据；两次读取都没有取得对应内容，最后才读取并插入文字。
+
+下面重点展开图片数据分支。`readClipboardImage` 根据操作系统选择读取器，再处理读取结果：没有取得图片时返回 `null`，取得图片后完成必要的格式转换，并返回图片对象。下面保留 macOS 分支和读取后的结果处理：
+
+```ts
+// src/repl/clipboard-image.ts
+// readClipboardImage 函数内部节选：macOS 路径及共同的结果处理。
+// 省略环境变量准备和 Termux 检查。
+const platform = options?.platform ?? process.platform;
+const run = options?.run ?? runClipboardCommand;
+const convert = options?.convert ?? convertImageBytesToPng;
+
+let image: ClipboardImage | null | undefined;
+if (platform === "darwin") {
+  image = await readViaDarwin(run);
+}
+// 省略其他平台的 else if 分支，以及不支持的平台返回 null 的分支。
+
+if (!image) {
+  return null;
+}
+
+// 将需要转换的格式转为 PNG；转换失败时不返回图片。
+if (!isSupportedImageMimeType(image.mimeType)) {
+  const pngBytes = await convert(image.bytes);
+  if (!pngBytes) {
+    return null;
+  }
+  return { bytes: pngBytes, mimeType: "image/png" };
+}
+
+return image;
+```
+
+`darwin` 是 macOS 的平台标识，这个分支将剪贴板读取交给 `readViaDarwin`。这个函数通过 `osascript` 执行 `DARWIN_JXA` 中的系统脚本，再接收脚本输出。输出为空时返回 `null`；取得图片数据后，返回包含图片字节和媒体类型的对象：
+
+```ts
+// src/repl/clipboard-image.ts
+async function readViaDarwin(
+  run: typeof runClipboardCommand
+): Promise<ClipboardImage | null | undefined> {
+  const out = await run("osascript", ["-l", "JavaScript", "-e", DARWIN_JXA]);
+  if (out === undefined) return undefined;
+  const base64 = out.toString("utf-8").trim();
+  if (base64 === "") return null;
+  const bytes = new Uint8Array(Buffer.from(base64, "base64"));
+  if (bytes.length === 0) return null;
+  return {
+    bytes,
+    mimeType: detectSupportedImageMimeType(bytes) ?? "application/octet-stream",
+  };
+}
+```
+
+这里传给 `osascript` 的 `DARWIN_JXA`，就是保存剪贴板读取逻辑的脚本字符串。下面看看它怎样从系统剪贴板取得图片数据；其中的 `$` 用于访问 macOS 的系统接口：
+
+```js
+// src/repl/clipboard-image.ts
+// DARWIN_JXA 字符串中的脚本节选：读取剪贴板 PNG 数据。
+// 省略前面的系统库加载和 else 分支内的 TIFF 读取、转换。
+const pb = $.NSPasteboard.generalPasteboard;
+let out = "";
+const png = pb.dataForType($.NSPasteboardTypePNG);
+if (!png.isNil()) {
+  out = png.base64EncodedStringWithOptions(0).js;
+} else {
+  // 源码还会尝试读取 TIFF，并转换为 PNG。
+}
+out;
+```
+
+`dataForType` 向系统请求指定格式的数据，`isNil()` 用来检查是否取得了数据。PNG 可用时，脚本将读取结果传回 Ink；没有 PNG 时，完整源码还会尝试读取 TIFF 并转换为 PNG。两种格式都没有取得可用结果，输出就保持为空。
+
+图片读取成功后，`readClipboardImage` 将包含 `bytes` 和 `mimeType` 的图片对象返回给 `handlePasteImage`。前面的 `if (image)` 分支随后调用 `writeClipboardImageToTmp`，保存图片并取得临时文件路径，再将路径插入输入框：
+
+```ts
+// src/repl/clipboard-image.ts
+export function writeClipboardImageToTmp(image: ClipboardImage): string {
+  const ext = extensionForImageMimeType(image.mimeType) ?? "png";
+  const filePath = join(tmpdir(), `ink-clipboard-${randomUUID()}.${ext}`);
+  writeFileSync(filePath, Buffer.from(image.bytes));
+  return filePath;
+}
+```
+
+剪贴板图片读取并保存成功后，图片数据保存在本地临时文件中，输入框里插入的是引用这个文件的路径。输入框里可能出现 `/tmp/ink-clipboard-….png`，用户可以在它旁边补充修复要求；实际临时目录由操作系统决定。
+
+这里使用 Base64，将图片字节作为系统脚本的文本结果传回 Ink，再还原为字节。这样可以沿用 `osascript` 的脚本返回值输出方式，代价是增加编解码开销和约三分之一的传输体积。这是当前实现的选择；标准输出也可以直接传输原始字节，Base64 并不是传输图片的必需步骤。
+
+**为什么输入框用文件路径引用图片？** 当前编辑器的提交回调接收文字，REPL 也把这段文字作为 `userMessage` 交给运行入口。用路径引用图片后，输入框可以继续负责编辑任务文字。提交后，模型先收到路径和问题文字，还需要实际调用 `read` 才能取得图片数据。下面继续看这次读取怎样把图片加入对话。
+
+### 2.2 `read` 怎样读取并返回图片？
+
+同一个 `read` 工具既可以读取登录页面的截图，也可以读取页面的代码文件。模型提出 `read` 后，工具先解析路径、读取文件，再根据文件字节选择处理分支。下面的节选展示图片处理的提前返回，以及后面的文本处理路径：
+
+```ts
+// src/core/tools/read.ts
+// createReadTool 返回对象的 execute：图片与文本的分流节选。
+// 此前已完成参数校验、路径解析和 readFile。
+const mimeType = detectSupportedImageMimeType(bytes);
+if (mimeType !== undefined) {
+  const nonVisionNote =
+    options.modelSupportsVision !== undefined && !options.modelSupportsVision()
+      ? "\n[Current model does not support images. The image will be omitted from this request.]"
+      : "";
+  const autoResize = options.imageProcessing?.autoResize ?? true;
+  const processed = await processImage(bytes, mimeType, {
+    autoResizeImages: autoResize,
+  });
+  if (!processed.ok) {
+    return {
+      output: `Read image file [${mimeType}]\n${processed.message}${nonVisionNote}`,
+    };
+  }
+  // 省略关闭缩放时的超限返回，以及 hints、content 的构造。
+  // 内容块构造见下文，图片处理和大小限制见第 3 节。
+  return {
+    output: `Read image file [${processed.mimeType}]${hints}${nonVisionNote}`,
+    content,
+  };
+}
+
+// 未识别为支持的图片时，先做简单的二进制检查。
+const probe = bytes.subarray(0, 8192);
+if (probe.includes(0)) {
+  return {
+    output: `Error: ${requested} looks like a binary file; the read tool only supports text.`,
+    isError: true,
+  };
+}
+
+// 处理普通文本：将文件字节解码为文本，并拆分为行。
+const allLines = logicalLines(new TextDecoder().decode(bytes));
+// 省略 offset/limit 选行、越界检查、截断及 output 的拼接。
+return { output, isError: false };
+```
+
+图片分支成功时返回带有图片内容块的 `content`，处理失败时返回省略原因；这两种情况都会结束本次读取，不会继续走文本分支。只有未识别为支持的图片时，才会检查前 8 KiB 是否包含 NUL（零字节），发现这类二进制特征就返回错误。通过检查后，工具才按文本解码、选取行并截断，最后将读取结果放在 `output` 字符串中。
+
+`nonVisionNote` 用于在文字结果中提示当前模型被判断为不支持图片；支持图片或未提供能力回调时，它是空字符串。它只添加说明，不阻止图片处理；通过处理和大小检查后，`read` 仍返回图片块。模型能力怎样判断、发送前怎样实际省略图片，见[第 4.1 节](#41-发送前怎样检查模型的图片能力)。
+
+图片类型的判断由 [`image-sniff.ts`](https://github.com/FishInSalt/ink/blob/main/src/core/tools/image-sniff.ts) 中的 `detectSupportedImageMimeType` 完成。这个函数只接收文件字节，没有文件名或扩展名参数。下面保留主函数，省略前缀比较和 PNG、BMP 结构检查等辅助函数：
+
+```ts
+// src/core/tools/image-sniff.ts
+// 省略 startsWith、startsWithAscii、isPng、isAnimatedPng、isBmp 等辅助函数。
+// PNG 的固定文件头，用于按字节识别格式。
+const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+
+export function detectSupportedImageMimeType(
+  buffer: Uint8Array
+): string | undefined {
+  // JPEG：匹配文件头，并拒绝 FF D8 FF F7 这个特定头部组合。
+  if (startsWith(buffer, [0xff, 0xd8, 0xff]))
+    return buffer[3] === 0xf7 ? undefined : "image/jpeg";
+  // PNG：检查头部结构，并排除检测到的动画 PNG。
+  if (startsWith(buffer, PNG_SIGNATURE))
+    return isPng(buffer) && !isAnimatedPng(buffer) ? "image/png" : undefined;
+  if (startsWithAscii(buffer, 0, "GIF")) return "image/gif";
+  if (startsWithAscii(buffer, 0, "RIFF") && startsWithAscii(buffer, 8, "WEBP"))
+    return "image/webp";
+  if (startsWithAscii(buffer, 0, "BM") && isBmp(buffer)) return "image/bmp";
+  // 未识别为支持的图片格式，并不意味着数据一定是普通文本。
+  return undefined;
+}
+```
+
+`startsWith` 比较文件开头的字节，`startsWithAscii` 检查指定位置的 ASCII 字符。函数据此识别 JPEG、PNG、GIF、WebP、BMP，返回对应的媒体类型；没有匹配到支持的格式时返回 `undefined`。把 JPEG 改名为 `.png`，不会改变这一步的识别结果。
+
+部分格式还有额外检查：`isPng` 检查 PNG 的头部结构，`isAnimatedPng` 检查数据块中的 `acTL` 动画控制标记，识别到 APNG 时返回 `undefined`；`isBmp` 检查 BMP 的部分头部字段。JPEG 分支还会拒绝以 `FF D8 FF F7` 开头的数据，其中的 `FF F7` 是 [JPEG-LS 的帧起始标记](https://github.com/team-charls/charls/blob/main/src/jpeg_marker_code.hpp)。
+
+这些检查决定是否进入图片处理分支，不保证文件完整、可以解码；损坏图片仍可能在后续处理时被省略。
+
+文本内容可以直接放在 `output` 字符串中。图片不能只返回“已读取图片”这句话：这只是结果说明，没有像素内容。
+
+Ink 为此使用内容块数组。每个块明确标记是文字还是图片；图片块同时携带媒体类型和 Base64 数据：
+
+```ts
+// src/core/messages.ts
+export type ContentBlock =
+  | { type: "text"; text: string }
+  | { type: "image"; data: string; mimeType: string };
+```
+
+Base64 是把二进制字节编码为字符串的方法，便于放进 JSON；它没有识别图片中的文字，也没有生成视觉描述。图片分析仍由模型服务完成。`mimeType` 则告诉接收方数据是什么格式，例如 `image/png`。
+
+图片处理成功并通过大小检查后，`read` 将说明和图片放在一起返回：
+
+```ts
+// src/core/tools/read.ts
+// execute 的图片分支末尾；处理和大小检查已完成。
+const hints =
+  processed.hints.length > 0 ? `\n${processed.hints.join("\n")}` : "";
+const content: ContentBlock[] = [
+  {
+    type: "text",
+    text: `Read image file [${processed.mimeType}]${hints}${nonVisionNote}`,
+  },
+  { type: "image", data: processed.data, mimeType: processed.mimeType },
+];
+return {
+  output: `Read image file [${processed.mimeType}]${hints}${nonVisionNote}`,
+  content,
+};
+```
+
+`hints` 用来附带格式转换和尺寸变化等说明。`output` 是文字结果，`content` 才包含完整的结构化内容。执行循环接收结果时，优先选用后者：
+
+```ts
+// src/core/loop.ts
+// runTool：工具执行成功后的返回对象节选。
+// 省略 display、taskRecord 和外围异常处理。
+return {
+  toolCallId: call.id,
+  toolName: call.name,
+  content: result.content ?? result.output,
+  isError: result.isError ?? false,
+};
+```
+
+之后，循环把结果写入 `role: "toolResult"` 的内部消息，再发起下一次模型调用。这时历史里既有“模型请求读取哪个文件”，也有“这次读取实际得到的图片”。调用 ID 保留两者的对应关系，具体工具调用流程见[第 03 篇](/posts/coding-agent-03-tools/)。
+
+终端显示可以只呈现读取说明、格式和大小，不需要把 Base64 打印出来。界面是否画出缩略图，与请求是否携带图片，是两个独立问题。
+
+把上面的步骤连起来，就能看到这张截图从粘贴到随模型请求发送的过程：
+
+<ImageInputFlow />
+
+## 3. 图片怎样变成适合发送的数据
+
+上一节的 `read` 在构造图片内容块前，会先调用 `processImage`。这个函数接收图片字节和媒体类型，成功时返回 Base64 数据、处理后的媒体类型和提示文字 `hints`；失败时返回原因。下面沿着这次调用，看图片怎样完成格式转换和缩放，以及处理结果怎样交回 `read`。
+
+### 3.1 统一图片格式，限制尺寸和编码体积
+
+登录页面截图可能很宽，也可能因高分辨率而占用较多空间。Ink 先统一图片格式，再在默认开启的自动缩放流程中控制像素尺寸和编码体积。先看 [`processImage`](https://github.com/FishInSalt/ink/blob/main/src/core/image/image-process.ts) 的主流程：
+
+```ts
+// src/core/image/image-process.ts
+// processImage 函数内部节选；省略函数签名和关闭缩放时的返回分支。
+const autoResizeImages = options?.autoResizeImages ?? true;
+
+// 1. 准备图片格式；转换失败就提前返回。
+const normalized = await normalizeImage(bytes, mimeType);
+if (!normalized) {
+  return {
+    ok: false,
+    // 省略说明转换失败的 message 字段。
+  };
+}
+
+// 2. 默认进入自动缩放流程；没有取得可用结果就返回失败。
+if (autoResizeImages) {
+  const resized = await resizeImage(
+    normalized.bytes,
+    normalized.mimeType,
+    options?.resizeOptions
+  );
+  if (!resized) {
+    return {
+      ok: false,
+      // 省略说明缩放处理失败的 message 字段。
+    };
+  }
+
+  // 3. 汇总提示，将处理后的图片数据交回 read。
+  const hints: string[] = [];
+  // 省略格式转换提示的构造及追加。
+  const dimensionNote = formatDimensionNote(resized);
+  if (dimensionNote) hints.push(dimensionNote);
+  return {
+    ok: true,
+    data: resized.data,
+    mimeType: resized.mimeType,
+    hints,
+  };
+}
+// 省略关闭缩放时直接编码 normalized.bytes 并返回的分支。
+```
+
+`normalizeImage` 先规范媒体类型，例如把 `image/jpg` 统一为 `image/jpeg`；需要转换格式时，则将图片转为 PNG，例如 BMP。转换成功后，`resizeImage` 接收处理后的字节和媒体类型，返回图片数据及原尺寸、输出尺寸等信息。`processImage` 再整理提示文字，将 `data`、`mimeType` 和 `hints` 一起返回给 `read`。
+
+图片解码、缩放和编码需要一定的计算量。`resizeImage` 默认把图片处理任务交给 Worker 线程。如果 Worker 无法启动，或处理任务时抛出异常，就改在调用 `resizeImage` 的线程中处理这张图片。两种方式使用相同的处理算法。下面看这套算法怎样控制图片的尺寸和编码体积。
+
+| 约束     | 默认值                                    | 检查对象              |
+| -------- | ----------------------------------------- | --------------------- |
+| 像素尺寸 | 宽、高分别不超过 2000 像素                | 解码后的图片宽高      |
+| 编码体积 | 小于 `4.5 × 1024 × 1024` 字节，即 4.5 MiB | Base64 字符串的字节数 |
+
+这些上限是 Ink 对每张图片采用的本地处理预算，不保证多张图片加上文字之后的整个请求一定能被模型服务接收。
+
+**像素尺寸与编码后的字节数需要分别控制。** 两张同样宽高的图片，因内容和编码方式不同，文件大小可能相差很大；一张压缩得很小的长截图，像素尺寸又可能很大。Base64 编码还会增加体积：对 `n` 个原始字节，编码长度是 `4 × ceil(n / 3)`。例如一张 3.6 MiB 的文件，编码后大约是 4.8 MiB，已经超过上述预算，不能只看磁盘上的文件大小。
+
+`resizeImageInProcess` 使用 Photon 的 WASM 实现解码和缩放。它先解码取得尺寸；如果尺寸与编码体积都在限制内，就将传入的图片字节编码为 Base64 返回，保留其图片编码。这里保留的是 `normalizeImage` 输出的字节；BMP 若已转为 PNG，便不再是原 BMP 文件的字节。
+
+未满足预算时，算法按以下顺序寻找结果：
+
+1. 尺寸超限时先等比缩小，使宽和高都不超过上限；如果只有编码体积超限，首轮仍使用原宽高。
+2. 在当前尺寸下生成 PNG 和若干 JPEG 候选，按顺序选择编码体积满足预算的第一个。
+3. 如果都不满足，把宽、高继续乘以 `0.75` 后取整，最小为 `1`，再试一次；直到找到结果或无法继续缩小。
+
+下面保留候选选择与尺寸递减的部分。`tryEncodings` 会先生成 PNG，再按 `qualitySteps` 中的质量参数生成 JPEG；`candidate.encodedSize` 是候选图片经过 Base64 编码后的字节数：
+
+```ts
+// src/core/image/image-resize-core.ts
+// resizeImageInProcess：已完成解码、原样返回检查和初始目标尺寸计算。
+// 省略 tryEncodings 定义、返回值中的尺寸元信息、外围 catch/finally。
+const qualitySteps = Array.from(new Set([opts.jpegQuality, 85, 70, 55, 40]));
+let currentWidth = targetWidth;
+let currentHeight = targetHeight;
+
+while (true) {
+  // 在当前尺寸下，按 PNG、不同质量 JPEG 的顺序生成候选。
+  const candidates = tryEncodings(currentWidth, currentHeight, qualitySteps);
+  for (const candidate of candidates) {
+    // 按顺序返回首个 Base64 编码体积满足预算的候选。
+    if (candidate.encodedSize < opts.maxBytes) {
+      return {
+        data: candidate.data,
+        mimeType: candidate.mimeType,
+        // 还会返回原尺寸、输出尺寸及 wasResized: true。
+      };
+    }
+  }
+
+  // 所有候选都超限：已缩到最小尺寸时停止，否则继续缩小。
+  if (currentWidth === 1 && currentHeight === 1) break;
+  const nextWidth =
+    currentWidth === 1 ? 1 : Math.max(1, Math.floor(currentWidth * 0.75));
+  const nextHeight =
+    currentHeight === 1 ? 1 : Math.max(1, Math.floor(currentHeight * 0.75));
+  // 尺寸无法再变化时，也结束重试。
+  if (nextWidth === currentWidth && nextHeight === currentHeight) break;
+  currentWidth = nextWidth;
+  currentHeight = nextHeight;
+}
+
+// 未找到满足预算的结果，交由调用方返回失败说明。
+return null;
+```
+
+这里寻找的是“按既定顺序，第一个满足体积预算的候选”，没有比较所有候选的视觉效果。减小尺寸和使用有损编码可能让截图中的小字更难辨认；通过大小检查只说明满足本地预算，不能证明登录页面上的错误提示仍然清晰可读。
+
+如果关闭 `images.autoResize`，`read` 会向 `processImage` 传入 `autoResizeImages: false`，跳过缩放与候选重编码流程，仍做必要的格式转换并编码为 Base64。随后，`read` 额外检查返回数据的编码体积；超限时返回文字说明，提示先缩小图片或重新启用自动缩放。关闭缩放仍可能发生 BMP 转 PNG 等转换，因此不能保证逐字节保留原文件。
+
+### 3.2 缩放后，怎样提示坐标换算？
+
+如果截图从 `3000 × 2000` 缩到 `2000 × 1333`，模型看到的像素位置就属于缩小后的图片。让模型根据截图指出某个位置时，如果没有说明，坐标可能被误用到原图。
+
+前面 `processImage` 中的 `formatDimensionNote(resized)` 就负责生成原尺寸、发送尺寸和换算提示。参数 `resized` 是 `resizeImage` 的返回结果，包含原尺寸、输出尺寸和 `wasResized` 标志：
+
+```ts
+// src/core/image/image-resize.ts
+export function formatDimensionNote(result: ResizedImage): string | undefined {
+  if (!result.wasResized) return undefined;
+
+  const scale = result.originalWidth / result.width;
+  return `[Image: original ${result.originalWidth}x${result.originalHeight}, displayed at ${result.width}x${result.height}. Multiply coordinates by ${scale.toFixed(2)} to map to original image.]`;
+}
+```
+
+沿用这个尺寸示例，提示中的比例是 `1.50`：发送图片中的横坐标 `600` 大致对应原图的 `900`。由于尺寸取整和比例保留两位小数，这是一条近似换算提示。源码中的 `wasResized` 在成功选出重编码候选时也会设为 `true`；如果只重新编码而宽高未变，提示中的换算比例就是 `1.00`。
+
+这条提示由 `processImage` 放入返回值的 `hints`，再由 `read` 拼进文字内容块，与图片块一起交回执行循环，正好接回第 2.2 节中的结果构造。
+
+这个比例描述的是图片像素之间的关系。截图像素与网页 CSS 像素还可能受设备像素比、浏览器缩放和截图范围影响，不能仅凭这个比例就推导应把按钮移动多少 CSS 像素。对于登录页面任务，截图先帮助定位遮挡现象，具体修改仍需结合布局代码。
+
+### 3.3 处理失败后，模型会收到什么？
+
+默认启用自动缩放时，格式转换失败、图片无法解码、处理依赖不可用，或者缩到极小仍不满足预算，都会使 `processImage` 返回 `ok: false` 和省略原因。第 2.2 节中 `read` 的 `if (!processed.ok)` 分支随后将原因写入文字结果，交回执行循环，不返回图片块。
+
+关闭缩放后因编码体积超限而省略图片时，`read` 同样只返回文字说明。模型可以据此知道这次没有取得可分析的图片，并提示用户缩小图片或调整设置。
+
+这些省略分支没有显式设置 `isError: true`，循环会按默认值记录为 `false`。判断图片是否成功进入结果时，还需要检查返回的图片块和 `Image omitted` 说明。
+
+## 4. 同一个图片块，怎样转换成模型请求
+
+前面的 `read` 已经把处理后的图片放入内部消息。模型接入层是 Ink 中负责与模型 API 通信的代码，承担请求转换、发送和响应解析。不同 API 的具体处理由对应的模型适配器完成。
+
+发送请求时，适配器先根据当前模型的图片能力，决定是否携带这些图片，再将内容块转换成对应 API 要求的请求字段和消息结构。
+
+### 4.1 发送前，怎样检查模型的图片能力？
+
+假设刚才用支持图片的模型读取了登录页面截图，随后又切换到只支持文字的模型。历史里的图片仍然存在，下一次请求却需要按新模型的能力处理。因此，适配器会在每次发送请求前检查当前模型，而不是沿用读取图片时的判断。
+
+第 2.2 节中的 `nonVisionNote` 只是 `read` 返回的文字提示；发送时是否实际携带图片，由这里的处理决定。以 Chat Completions 适配器为例：
+
+```ts
+// src/provider/openai-completions.ts
+// createOpenAICompletionsProvider 返回对象的 stream：请求组装前。
+const family = options.name ?? "openai";
+const messages = downgradeUnsupportedImages(
+  request.messages,
+  modelSupportsVision(family, request.model)
+);
+// 随后将 messages 交给 toWireMessages，组装请求。
+```
+
+这里先通过 `modelSupportsVision` 判断当前模型的图片能力，再由 `downgradeUnsupportedImages` 处理本次请求所用的消息。支持图片时保留内容；不支持或无法确认支持时，将图片块替换为文字占位。
+
+`modelSupportsVision(provider, model)` 的参数分别是服务商标识和模型 ID。它使用两类已有资料判断能力：
+
+- **模型目录记录**：默认来自 pi.dev 提供的模型元数据接口。Ink 将记录保存到本地缓存并加载到内存，`catalogEntryFor` 查询这些已加载的记录，其中的 `input` 字段声明模型接受哪些输入类型。相关获取与缓存代码见 [`catalog.ts`](https://github.com/FishInSalt/ink/blob/main/src/provider/catalog.ts)。
+- **内置规则 `VISION_RULES`**：固化在 `vision.ts` 中的静态表，按服务商与模型名前缀记录图片能力。部分源码注释注明了当时参考的官方文档或 pi.dev 目录信息；这些规则随代码发布，在目录缺少能力声明时提供兜底。
+
+函数优先使用模型目录中的能力声明，再匹配内置规则；判断时不会向模型发送图片来探测能力：
+
+```ts
+// src/provider/vision.ts
+export function modelSupportsVision(provider: string, model: string): boolean {
+  // 优先使用模型目录中的 input 能力声明。
+  const entry = catalogEntryFor(provider, model);
+  if (entry?.input !== undefined) return entry.input.includes("image");
+
+  // 缺少 input 时，按服务商和模型名称前缀匹配内置规则。
+  for (const rule of VISION_RULES) {
+    if (rule.provider === provider && model.startsWith(rule.prefix))
+      return rule.vision;
+  }
+
+  // 未能确认支持图片时，按不支持处理。
+  return false;
+}
+```
+
+`catalogEntryFor` 按服务商与模型 ID 精确查找目录记录。例如，`input: ["text", "image"]` 表示支持图片，`input: ["text"]` 表示只接受文本。存在 `input` 声明时，函数直接使用它，不再检查前缀规则。
+
+没有目录记录或记录缺少 `input` 时，才按顺序匹配 `VISION_RULES`，使用首条匹配规则的 `vision` 值；仍未匹配则返回 `false`。因此，返回 `false` 既可能表示明确不支持，也可能表示资料不足、无法确认支持。这是客户端依据能力声明和规则作出的判断，没有通过真实图片请求来探测服务。
+
+判断完成后，图片怎样被省略？继续沿着 `read` 返回的工具结果，看 [`downgradeUnsupportedImages`](https://github.com/FishInSalt/ink/blob/main/src/provider/shared.ts) 的处理。下面省略用户消息分支，保留工具结果的内容替换与返回：
+
+```ts
+// src/provider/shared.ts
+// downgradeUnsupportedImages 函数内部节选。
+if (supportsVision) return messages;
+
+// 省略内部辅助函数 replace 的定义：它创建新的内容数组，
+// 保留文字，将图片替换为占位文字，并合并连续的占位。
+return messages.map(msg => {
+  // 省略用户消息中的图片处理分支。
+  if (msg.role === "toolResult") {
+    let changed = false;
+    const results = msg.results.map(result => {
+      if (typeof result.content === "string") return result;
+      changed = true;
+      return {
+        ...result,
+        content: replace(
+          result.content,
+          "(tool image omitted: model does not support images)"
+        ),
+      };
+    });
+    return changed ? { ...msg, results } : msg;
+  }
+  return msg;
+});
+```
+
+`replace` 用新数组接收处理后的内容；`...result` 和 `...msg` 则分别构造工具结果与消息对象的副本。图片所在的原内容数组没有被修改，后面的请求转换使用返回的 `messages`。模型收到的工具结果中会出现以下文字，原历史中的图片块仍然保留：
+
+```text
+(tool image omitted: model does not support images)
+```
+
+以后切回支持图片的模型，只要该消息仍在当前上下文里，就可以重新携带这张图片，无需因为上一次省略而重读文件。能力声明或规则可能过时，这里的判断也不保证服务一定接受请求。
+
+### 4.2 不同模型服务接口的图片请求格式有什么区别？
+
+不同模型服务接口对图片字段和消息结构有不同要求。下面以 Chat Completions、Anthropic Messages 和 Codex Responses 为例，看 Ink 的适配器怎样将内部的 `type: "image"` 内容块转换成各自使用的请求格式。
+
+下表从图片字段形式、工具图片所在位置两个方面，对照 Ink 当前三个适配器的转换方式；这些是当前源码的实现，不代表所有兼容服务都支持同样的请求结构。
+
+<div className="overflow-x-auto" role="region" aria-label="模型图片协议对照" tabIndex={0}>
+
+| Ink 适配器         | 图片字段形式                                      | 工具图片所在位置                                                 |
+| ------------------ | ------------------------------------------------- | ---------------------------------------------------------------- |
+| Chat Completions   | `image_url` 内容块，URL 是包含 Base64 的 data URL | 文字留在 `tool` 消息，图片移到连续工具结果之后的一条 `user` 消息 |
+| Anthropic Messages | `image` 块，`source` 包含 Base64 数据与媒体类型   | 图片放在 `tool_result.content` 里面                              |
+| Codex Responses    | `input_image` 内容块                              | 图片放在 `function_call_output.output` 的内容数组中              |
+
+</div>
+
+继续看登录页面截图。假设模型在同一条回复里提出两个调用：`t1` 读取截图，`t2` 读取页面源码。两个工具结果都返回后，Ink 的 Chat Completions 适配器会把它们转换成以下排列：
+
+| 顺序 | 消息角色    | 携带的内容                                   |
+| ---- | ----------- | -------------------------------------------- |
+| ①    | `assistant` | `t1`、`t2` 两个工具调用                      |
+| ②    | `tool`      | `tool_call_id: "t1"`，截图读取说明与尺寸提示 |
+| ③    | `tool`      | `tool_call_id: "t2"`，页面源码               |
+| ④    | `user`      | 附件说明和截图的 `image_url` 内容块          |
+
+第 ④ 条由适配器生成。为保持 `t1`、`t2` 的工具结果连续排列，适配器先暂存图片，等这些结果写入请求消息数组后，再追加携带图片的 `user` 消息。文字和图片随**同一次请求**发出，无需用户再次提交。
+
+这条图片消息怎样生成？`toWireMessages` 遍历工具结果中的内容块时，会将图片转换为 `image_url`，暂存在 `pendingImages` 中：
+
+```ts
+// src/provider/openai-completions.ts
+// toWireMessages 的 toolResult 分支：遍历 r.content 时的图片处理节选。
+// 省略文字收集、hasImages 标记及工具文字消息的构造。
+pendingImages.push({
+  type: "image_url",
+  image_url: { url: `data:${block.mimeType};base64,${block.data}` },
+});
+```
+
+虽然字段叫 `image_url`，这里的值是包含图片数据的 data URL。`data:image/png;base64,` 表示后面是 PNG 的 Base64 内容，模型服务无需读取本机路径，也没有从公共图片地址下载文件。
+
+`wire` 保存转换后、将要写入请求的消息；`pendingImages` 暂存已经转换成请求格式的图片内容块。图片暂存数组与辅助函数 `flushPendingImages` 在遍历消息前定义，后者负责把暂存图片追加为一条 `user` 消息，并清空暂存数组：
+
+```ts
+// src/provider/openai-completions.ts
+// toWireMessages 内部的图片暂存数组与辅助函数。
+let pendingImages: WireUserPart[] = [];
+const flushPendingImages = (): void => {
+  if (pendingImages.length === 0) return;
+  wire.push({
+    role: "user",
+    content: [
+      { type: "text", text: "Attached image(s) from tool result:" },
+      ...pendingImages,
+    ],
+  });
+  pendingImages = [];
+};
+```
+
+遍历消息时，遇到非 `toolResult` 消息之前，或全部消息遍历结束时，才调用这个辅助函数追加暂存图片。因而，即使工具结果分布在连续多条内部 `toolResult` 消息里，也会先输出这些结果，再附加图片。消息遍历与转换的完整源码见[第 02 篇的工具结果讲解](/posts/coding-agent-02-model-protocol/#23-工具执行后怎样把结果交回模型)。
+
+Anthropic 和 Codex Responses 的当前转换则将图片放在对应的工具结果结构内部，具体实现分别见 [`anthropic.ts`](https://github.com/FishInSalt/ink/blob/main/src/provider/anthropic.ts) 和 [`codex-responses.ts`](https://github.com/FishInSalt/ink/blob/main/src/provider/codex-responses.ts)。执行循环继续使用统一的内部消息，由各适配器处理请求字段与消息位置的差异。
+
+## 5. 会话恢复与上下文压缩，怎样处理图片？
+
+模型已经读取了登录页面截图。如果退出 Ink 后恢复会话，还需要重新读取这张图吗？如果对话变长、旧消息被压缩，模型还能看到截图中的细节吗？这两个问题分别取决于会话保存的内容，以及恢复或压缩后实际使用的上下文。
+
+### 5.1 会话恢复后，图片还需要重新读取吗？
+
+启用会话保存时，Ink 会把对话消息写入本地会话文件，供下次恢复对话。前面 `read` 返回的工具结果已经包含处理后的图片数据，因此保存这条工具结果时，图片数据也会一同保存。恢复会话后，只要这条消息仍在使用的上下文中，就可以直接复用其中的图片，无需再次读取原图片文件。
+
+下面看图片数据怎样随消息保存。`SessionStore` 负责管理本地会话记录，它的 [`appendMessage`](https://github.com/FishInSalt/ink/blob/main/src/core/session/store.ts) 方法接收完整消息，将消息放入一条记录，再交给内部的 `append` 方法写入会话文件：
+
+```ts
+// src/core/session/store.ts
+// SessionStore.appendMessage 内部节选；省略末尾返回记录 ID 的语句。
+const entry: MessageEntry = {
+  type: "message",
+  // 省略 id、parentId、timestamp 等记录信息。
+  message, // 完整消息，包括工具结果中的图片块。
+};
+this.append(entry);
+```
+
+这里的 `message` 包含完整的工具结果，其中也包括图片内容块。`append` 随后用 `JSON.stringify` 将整条记录序列化为 JSON，再写入 JSONL 会话文件，图片块中的 Base64 数据和媒体类型因此被一起保存。
+
+恢复时，Ink 通过 `buildContext` 组装当前分支使用的消息。根据保存的内容，可以分为两种情况：
+
+| 保存到哪一步                                   | 恢复后具备什么                                           |
+| ---------------------------------------------- | -------------------------------------------------------- |
+| 只保存了用户输入的图片路径，还没读取成功       | 仍只有路径文字，需要文件继续存在，才能再次读取           |
+| 图片内容块已经写入会话，且仍被纳入恢复的上下文 | 可以直接从会话取得已保存的图片数据，不依赖原路径重新读取 |
+
+保存的内容是**当时处理后的图片**。如果原图已经缩小，恢复历史不会把丢失的细节还原回来。恢复后是否实际发送图片，仍要经过第 4 节的模型能力检查。Base64 直接进入会话文件，也意味着多次保存大图会增加磁盘占用。
+
+终端显示工具结果时可以只呈现文字说明，不打印图片数据。这只影响显示方式，会话文件仍然保存完整的图片块。
+
+### 5.2 上下文压缩后，模型还能看到旧图吗？
+
+对话变长后，Ink 会把较早的消息整理成摘要材料，交给模型生成文字摘要，再用摘要替代这部分旧消息，保留一段近期消息。图片在这个过程中会有不同的去向。
+
+先看摘要材料怎样生成。本文的截图位于工具结果中；[`serializeForSummary`](https://github.com/FishInSalt/ink/blob/main/src/core/compaction.ts) 处理这类消息时，会调用 `contentText` 提取文字，再限制文字长度。下面同时保留用户消息分支，便于对照：
+
+```ts
+// src/core/compaction.ts
+// serializeForSummary：保留用户消息和工具结果分支，省略助手消息分支。
+export function serializeForSummary(messages: AgentMessage[]): string {
+  const lines: string[] = [];
+  for (const message of messages) {
+    switch (message.role) {
+      case "user":
+        lines.push(
+          `[user]\n${truncate(contentText(message.content), MAX_USER_CHARS)}`
+        );
+        break;
+      // 省略 assistant 分支中的回答文字、工具调用记录整理。
+      case "toolResult":
+        for (const result of message.results) {
+          // 只取工具结果的文字，超长内容还会被截断。
+          lines.push(
+            `[tool result ${result.toolName}${result.isError ? " (error)" : ""}]\n${truncate(contentText(result.content), MAX_TOOL_RESULT_CHARS)}`
+          );
+        }
+        break;
+    }
+  }
+  return lines.join("\n\n");
+}
+```
+
+`contentText` 的实现很短：输入是内容块数组时，只保留文本块，并将它们拼成字符串。图片块不会进入返回值：
+
+```ts
+// src/core/messages.ts
+export function contentText(content: string | ContentBlock[]): string {
+  if (typeof content === "string") return content;
+  return content
+    .filter((b): b is { type: "text"; text: string } => b.type === "text")
+    .map(b => b.text)
+    .join("\n");
+}
+```
+
+`contentText` 只负责提取文字，不修改原内容块数组。Ink 将待压缩消息中的文字整理为摘要材料，再交给模型生成文字摘要。摘要请求不携带这些消息中的图片。
+
+生成摘要后，Ink 向会话文件追加一条压缩记录，其中包含文字摘要和原样保留的近期消息。`buildContext` 根据当前分支最新的压缩记录组装对话历史，其组成是：
+
+**文字摘要 + 保留的近期消息 + 压缩后新增的消息。**
+
+图片能否继续出现在这组消息中，取决于它所在的消息是否被保留：
+
+| 消息范围             | 压缩后怎样处理图片                           |
+| -------------------- | -------------------------------------------- |
+| 被摘要替代的较早消息 | 使用文字摘要替代，不再携带这些消息中的图片块 |
+| 原样保留的近期消息   | 图片块继续保留，可用于后续请求               |
+
+回到登录页面：当截图所在的较早历史需要压缩时，摘要模型收到的只是这段历史中的文字。如果其中已有“错误提示与按钮重叠”的回答，它就可以依据文字概括这个现象；最终摘要是否保留这条细节，取决于实际生成结果。尚未被文字描述的视觉细节，不会在本次摘要中通过重新查看截图得到补充。
+
+会话文件中已有的消息记录仍然保留，包括其中的图片块。恢复会话时，Ink 也通过 `buildContext` 按压缩记录重建对话历史，因此这些较早的图片块不会仅因仍在磁盘中，就自动重新加入后续请求。
+
+如果后续任务仍需查看已退出上下文的截图，可以再次调用 `read`，将图片重新加入当前对话。
+
+[第 04 篇](/posts/coding-agent-04-context/)和[第 05 篇](/posts/coding-agent-05-sessions/)分别解释压缩切点与历史恢复。
+
+## 6. 总结
+
+粘贴登录页面截图时，输入框里出现的只是文件路径。要让模型看到画面，还需要调用 `read` 读取图片，完成必要的格式和大小处理，再按照模型服务的要求将图片放进请求。从本地文件到模型能够使用的图片，中间的这些步骤，正是本文所解释的图片输入过程。
+
+图片进入对话后，还会随着历史一起保存和整理。会话保存下来的图片可以在恢复时复用；当它所在的旧消息被文字摘要替代，后续请求中保留的便是摘要里的描述。因此，判断模型现在能否看到一张图，既要看图片是否成功读入，也要看当前对话是否仍然携带它。

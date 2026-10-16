@@ -1,0 +1,96 @@
+---
+import "./series-visual.css";
+
+const steps = [
+  ["保存剪贴板图片，插入路径", "图片字节写入临时文件，输入框接收文件路径。"],
+  ["提交文字消息", "用户消息先只有图片路径和问题文字。"],
+  ["模型提出 read 调用", "模型根据消息中的路径，选择读取这张图片。"],
+  ["工具读取并处理图片", "read 读取文件字节，再调用 processImage。"],
+  ["图片随工具结果写入历史", "文字说明和图片块一起进入 toolResult 消息。"],
+  ["模型接入层构造请求", "按当前模型的图片能力处理内容块，再转换为请求字段。"],
+];
+---
+
+<figure
+  class="image-flow series-visual not-prose"
+  aria-labelledby="image-flow-title"
+>
+  <figcaption id="image-flow-title">粘贴的截图怎样进入模型请求</figcaption>
+  <ol aria-label="粘贴截图的处理流程">
+    {
+      steps.map(([title, detail], index) => (
+        <li class={index === steps.length - 1 ? "provider" : undefined}>
+          <strong>{title}</strong>
+          <span>{detail}</span>
+        </li>
+      ))
+    }
+  </ol>
+  <p class="timing">后续模型请求携带处理后的截图。</p>
+  <p class="caption">
+    从上往下读。图示假设截图保存、读取与处理成功，模型实际选择调用
+    read，且后续请求使用的模型支持图片。
+  </p>
+</figure>
+
+<style>
+  .image-flow {
+    margin: 2rem 0;
+    padding: 1.25rem;
+    border: 1px solid var(--series-rule);
+    border-radius: 0.8rem;
+    background: var(--series-paper);
+    color: var(--series-ink);
+  }
+  figcaption {
+    font-weight: 700;
+    line-height: 1.6;
+    margin-bottom: 1rem;
+  }
+  ol {
+    list-style: decimal;
+    padding-left: 1.35rem;
+    margin: 0;
+    font-size: 0.9rem;
+    line-height: 1.65;
+  }
+  li {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  li + li {
+    margin-top: 1rem;
+  }
+  li::marker {
+    color: var(--series-blue);
+    font-weight: 700;
+  }
+  li strong,
+  li span {
+    display: block;
+  }
+  li span {
+    margin-top: 0.2rem;
+    color: var(--series-secondary);
+  }
+  .timing {
+    margin: 1rem 0 0;
+    padding-top: 0.75rem;
+    border-top: 1px solid var(--series-rule);
+    color: var(--series-feedback);
+    font-size: 0.85rem;
+    line-height: 1.6;
+  }
+  .provider {
+    border: 1px solid var(--series-blue);
+    border-radius: 0.5rem;
+    padding: 0.75rem;
+    background: var(--series-blue-wash);
+  }
+  .caption {
+    margin: 1rem 0 0;
+    color: var(--series-secondary);
+    font-size: 0.85rem;
+    line-height: 1.65;
+  }
+</style>

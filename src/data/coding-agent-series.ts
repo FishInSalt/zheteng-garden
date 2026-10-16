@@ -101,7 +101,7 @@ export const codingAgentChapters = [
   },
   {
     number: "13",
-    title: "图片输入——图片怎样进入模型的上下文",
+    title: "图片输入——怎样把图片交给模型",
     question: "用户输入或工具读取的图片，怎样经过处理并进入模型请求？",
     postId: "coding-agent-13-images",
   },
