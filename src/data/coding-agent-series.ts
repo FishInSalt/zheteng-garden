@@ -81,7 +81,7 @@ export const codingAgentChapters = [
   },
   {
     number: "10 下",
-    title: "子代理续跑——保存了历史，为什么还不能直接继续？",
+    title: "子代理续跑——怎样恢复历史并继续执行？",
     question: "怎样核对运行条件、修复中断记录，并避免同一子会话被同时续跑？",
     postId: "coding-agent-10-child-resume",
   },

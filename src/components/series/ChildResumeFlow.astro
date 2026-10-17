@@ -1,0 +1,110 @@
+---
+import "./series-visual.css";
+
+const checks = [
+  {
+    title: "核对子会话与运行条件",
+    text: "用子会话标识查找记录，核对角色、模型、系统提示词、工具和工作目录，并检查父会话中是否已有实际启动过子代理的运行记录。",
+  },
+  {
+    title: "保证只有一个调用续跑，再读取最新历史",
+    text: "保证同一时间只有一个调用向子会话写入消息，再重新打开会话，读取最新历史。",
+  },
+  {
+    title: "检查工具调用与结果，修复缺失记录",
+    text: "先检查工具调用与结果是否对应，再处理可修复的文件尾部，为缺失的工具结果补上“结果未知”的错误说明。",
+  },
+  {
+    title: "追加新要求并运行",
+    text: "带着已有历史和新的调查要求调用模型，新回复和工具结果继续保存到同一个子会话。",
+  },
+  {
+    title: "整理结果，交回主 Agent",
+    text: "task 工具整理本次工具结果与运行记录，解除本次续跑对该子会话的占用，再将结果交回主 Agent。",
+  },
+];
+---
+
+<figure
+  class="resume-flow series-visual not-prose"
+  aria-labelledby="resume-flow-title"
+>
+  <figcaption id="resume-flow-title">一次续跑怎样接回已有子会话？</figcaption>
+  <ol>
+    {
+      checks.map((step, index) => (
+        <li>
+          <span class="step-number" aria-hidden="true">
+            {index + 1}
+          </span>
+          <div>
+            <strong>{step.title}</strong>
+            <p>{step.text}</p>
+          </div>
+        </li>
+      ))
+    }
+  </ol>
+  <p class="caption">
+    按编号从上向下阅读。检查未通过时会提前返回，不会启动新一轮运行。
+  </p>
+</figure>
+
+<style>
+  .resume-flow {
+    margin: 2rem 0;
+    padding: 1.25rem;
+    border: 1px solid var(--series-rule);
+    border-radius: 0.8rem;
+    background: var(--series-paper);
+    color: var(--series-ink);
+  }
+  figcaption {
+    margin-bottom: 1rem;
+    font-weight: 700;
+    line-height: 1.6;
+  }
+  ol {
+    display: grid;
+    gap: 0.75rem;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+  li {
+    display: grid;
+    grid-template-columns: 1.75rem minmax(0, 1fr);
+    align-items: start;
+    gap: 0.75rem;
+    padding: 0.85rem;
+    border: 1px solid var(--series-rule);
+    border-radius: 0.5rem;
+  }
+  .step-number {
+    display: grid;
+    place-items: center;
+    width: 1.75rem;
+    height: 1.75rem;
+    border-radius: 50%;
+    background: var(--series-blue-wash);
+    color: var(--series-blue);
+    font-size: 0.85rem;
+    font-weight: 700;
+  }
+  strong {
+    display: block;
+    font-size: 0.95rem;
+    line-height: 1.75;
+  }
+  li p {
+    margin: 0.35rem 0 0;
+    font-size: 0.85rem;
+    line-height: 1.8;
+  }
+  .caption {
+    margin: 1rem 0 0;
+    color: var(--series-secondary);
+    font-size: 0.85rem;
+    line-height: 1.8;
+  }
+</style>

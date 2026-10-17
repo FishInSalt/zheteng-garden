@@ -1,0 +1,427 @@
+---
+author: 折腾客
+pubDatetime: 2026-10-17T16:51:26Z
+modDatetime: 2026-10-17T16:51:26Z
+title: "Coding Agent 原理与实践 10（下）：子代理续跑——怎样恢复历史并继续执行？"
+featured: false
+draft: false
+tags:
+  - Coding Agent
+  - ink
+  - Agent 原理
+description: 从继续调查登录测试的任务出发，解释子代理怎样核对启动记录与运行条件、取得单写者租约、修复中断留下的历史，再带着新要求开始下一次运行。
+---
+
+import ChildResumeFlow from "@/components/series/ChildResumeFlow.astro";
+
+## 1. 有了子代理的历史，为什么还不能直接继续？
+
+[上篇](/posts/coding-agent-10-subagents/)中，主 Agent 把登录流程的调查交给子代理。子代理搜索源码、读取认证入口，最后返回报告：“登录入口是 `src/auth/login.ts`，增加失败次数限制时，需要关注计数与清零条件。”调查过程保存在子代理自己的会话里，主 Agent 通过 `task` 工具接收整理后的结果。
+
+现在我们还想了解：现有登录测试覆盖了什么，还需要补哪些用例？主 Agent 可以新建一个子代理调查这些测试，也可以继续使用之前的子代理，让它沿用已有会话历史，按新的要求开始一轮调查。后者就是本文所说的**子代理续跑**。
+
+上篇已经介绍了调用入口。假设上次 `task` 工具返回了子会话标识，主 Agent 可以再次调用：
+
+```json
+{
+  "resume": "child-session-id",
+  "prompt": "继续检查现有登录测试，说明增加失败次数限制后需要补充哪些测试。先重新确认相关文件的当前内容。"
+}
+```
+
+这是 `task` 工具的参数示例，`child-session-id` 要替换成之前返回的真实标识。它指向同一份子会话；`prompt` 则是这次追加的要求。
+
+看起来，只要从磁盘读出旧历史，再把这句话交给模型就行了。
+
+不过，续跑时还可能遇到以下问题：
+
+- **运行条件变了。**原来的角色提示词或可用工具已经改变，这次运行的条件与上次不同。
+- **执行结果没有记全。**子代理在修改文件时中断，历史里保存了工具调用，却没有对应结果，无法确认修改是否完成。
+- **多个调用同时续跑。**两次调用都想继续同一个子会话，各自根据旧历史开始工作，新增的消息可能无法正确衔接。
+
+收到带有 `resume` 参数的 `task` 调用后，Ink 会按下面的流程检查并准备本次续跑。
+
+<ChildResumeFlow />
+
+下面先看第一步：Ink 怎样确认要继续的是哪个子会话，以及它是否具备续跑条件？这需要用到子代理启动时保存的条件，以及每次运行结束时留下的记录。
+
+## 2. 续跑前，怎样核对子会话和运行条件？
+
+### 2.1 启动记录和运行记录，分别保存什么？
+
+续跑前，需要核对启动时采用的配置，以及之前调用的结束情况。**启动记录**保存在子代理自己的会话（**子会话**）头部；**运行记录**随工具结果保存在主 Agent 的会话（**父会话**）中。下面对照两类记录保存的信息。
+
+<div className="overflow-x-auto [&_table]:min-w-[38rem] [&_th:first-child]:w-44" role="region" aria-label="启动记录与运行记录对照，窄屏可横向滚动" tabIndex={0}>
+
+| 记录                             | 保存位置                               | 保存的信息                                                           |
+| -------------------------------- | -------------------------------------- | -------------------------------------------------------------------- |
+| `ChildLaunchRecord`，启动记录    | 子会话文件的头部 `launch` 字段         | 父会话归属，以及角色、模型、提示词指纹、工具和工作目录等启动条件。   |
+| `TaskRecord`，一次调用的运行记录 | 父会话中对应 `task` 工具结果的附加字段 | 本次调用是否实际启动子代理、结束状态，以及历史和工作副本的保存情况。 |
+
+</div>
+
+**启动记录：`ChildLaunchRecord`**
+
+新建子代理时，`task` 工具会调用 `buildChildLaunch` 生成这份启动记录，再将它写入子会话头部。下面节选 [`child-launch.ts`](https://github.com/FishInSalt/ink/blob/main/src/core/child-launch.ts)，仅展示父子会话标识、模型、工作目录和系统提示词指纹，其他字段及后续补充逻辑省略：
+
+```ts
+// 文件：src/core/child-launch.ts
+// 所在函数：buildChildLaunch，构造启动记录。
+const record: ChildLaunchRecord = {
+  parentSessionId: input.parentSessionId,
+  childId: input.childId,
+  model: { ...input.model },
+  cwd: input.cwd,
+  system: { sha256: sha256Hex(normalizeSystemText(input.systemText)) },
+};
+```
+
+在 `ChildLaunchRecord` 中，`model` 保存子代理使用哪个**接入分组**、请求使用的模型 ID，以及 `provider/modelId` 形式的完整引用。接入分组用于选择模型的接入方式。例如，`deepseek` 表示使用 DeepSeek 的接入实现，由它读取对应的服务地址和认证凭据。接入分组与模型标识共同组成代码中的**模型绑定**，续跑时会沿用它。
+
+这份启动记录中的 `cwd` 保存工作目录，`system.sha256` 保存 Ink 组装后的系统提示词指纹：Ink 用 SHA-256 计算这个指纹，续跑时再按相同规则计算当前系统提示词的指纹，与启动时的记录比较。2.4 节会展示两份指纹怎样比较。
+
+**运行记录：`TaskRecord`**
+
+子代理运行结束或调用在启动前被拒绝时，`task` 工具会通过 `finish` 生成一份 `TaskRecord`，附在返回的工具结果上。下面节选 [`task.ts`](https://github.com/FishInSalt/ink/blob/main/src/core/tools/task.ts) 中 `buildTaskRecord` 调用的核心参数，其他字段省略：
+
+```ts
+// 文件：src/core/tools/task.ts
+// 所在位置：createTaskTool 返回的 execute，内部的 finish。
+buildTaskRecord({
+  attemptId, // 本次 task 调用的唯一编号
+  childId: rec.childId, // 子会话标识，续跑时沿用
+  launched: rec.launched === true,
+  status: terminal.status,
+  transcript: rec.transcript,
+  worktree: rec.worktree,
+});
+```
+
+上面的 `rec` 收集本次调用的运行情况，`terminal` 提供结束状态，`buildTaskRecord` 将这些值整理成 `TaskRecord`。在这份运行记录中，`launched` 表示是否实际启动了子代理，`status` 保存结束状态，`transcript` 记录子会话历史是否存在及其路径，`worktree` 记录工作副本（Git worktree）的路径、分支及保留或清理结果。
+
+`TaskRecord` 中的 `childId` 标识本次调用所属的子会话，**`attemptId` 是 Ink 为每次 `task` 调用自动生成的唯一编号**。同一个子会话可以被多次续跑，需要用它区分各次调用。例如，沿用本文的登录调查场景，编号简写如下：
+
+<div className="overflow-x-auto [&_table]:min-w-[28rem]" role="region" aria-label="子会话与调用编号示例，窄屏可横向滚动" tabIndex={0}>
+
+| 操作                         | `childId` | `attemptId` |
+| ---------------------------- | --------- | ----------- |
+| 首次调查登录流程             | C1        | A1          |
+| 续跑，检查现有登录测试       | C1        | A2          |
+| 再次续跑，补查需要新增的用例 | C1        | A3          |
+
+</div>
+
+三次调用共用子会话 C1，每次调用各生成一份 `TaskRecord`。一次 `task` 调用内部即使多次请求模型，也共用同一个 `attemptId`。
+
+`TaskRecord` 生成后，会作为 `task` 工具结果的附加字段，随工具结果一起保存到父会话中。续跑时，Ink 从父会话读取这些运行记录，检查子代理之前的运行情况。**这份运行记录供程序读取，不会发送给模型。**
+
+### 2.2 怎样找到原来的子会话？
+
+主 Agent 要让之前调查登录流程的子代理继续检查现有登录测试，可以再次调用 `task` 工具，通过 `resume` 参数传入其子会话标识 C1，通过 `prompt` 参数提供新的调查要求。角色和工作目录沿用该子会话的启动记录。
+
+`task` 工具调用 `findChildByLaunch`，在父会话文件所在目录的 `children` 子目录中，按子会话标识查找文件，并核对它是否属于当前父会话。文件路径由 Ink 定位，调用方只需提供子会话标识。
+
+查找成功后，Ink 会取得子会话及其启动记录。下面节选 [`task.ts`](https://github.com/FishInSalt/ink/blob/main/src/core/tools/task.ts) 中的对应位置：
+
+```ts
+// 文件：src/core/tools/task.ts
+// 所在函数：createTaskTool 返回的 execute，resume 分支。
+// 前面已完成参数检查，check.childId 是 resume 中的子会话标识。
+const found = findChildByLaunch(parentStore, check.childId);
+// ……省略 found.ok 为 false 时整理原因并返回错误的分支。
+// 以下代码只在查找成功后执行。
+let file = found.file;
+const launch = file.launch;
+```
+
+`file` 对应找到的子会话，`launch` 就是其中保存的启动记录 **`ChildLaunchRecord`**。后续将用这份记录核对运行条件。
+
+如果无法确定目标子会话，或者会话归属、启动记录等检查未通过，Ink 会拒绝续跑。
+
+这也解释了为什么一些旧子会话可以阅读，却不能续跑：它们保存了对话历史，却没有 `ChildLaunchRecord`，缺少核对首次启动条件的依据。
+
+### 2.3 怎样检查子代理之前的运行记录？
+
+找到子会话 C1 后，Ink 会调用 `validateChildContinuation`，检查父会话中是否保存过该子代理运行结束时生成的 `TaskRecord`。记录中的 `launched` 必须为 `true`，表示那次调用确实启动过子代理；启动前被拒绝的调用不计入这项检查。
+
+下面节选 [`child-launch.ts`](https://github.com/FishInSalt/ink/blob/main/src/core/child-launch.ts) 中的记录筛选与缺失检查，状态变量的初始化和有记录时的赋值省略：
+
+```ts
+// 文件：src/core/child-launch.ts
+// 所在函数：validateChildContinuation，检查父会话中的运行记录。
+const records = collectTaskRecords(parent.getEntries()).filter(
+  record => record.childId === launch.childId
+);
+const settled = records.filter(record => record.launched);
+// ……省略检查状态变量的初始化。
+if (settled.length === 0) {
+  reasons.push({
+    code: "no-record",
+    message: `no settled task record for child ${launch.childId} — it may still be running, or the process died before any parent-side write`,
+  });
+}
+// ……省略有记录时保存检查状态和最近结束状态的 else 分支。
+```
+
+`settled` 中只保留实际启动过子代理的运行记录。若一条也没有，Ink 会加入 `no-record` 拒绝原因，由 `task` 工具返回续跑错误。
+
+**运行结束不要求子任务成功完成。**正常返回、超时、中断或运行异常都可能留下记录，下一次仍可申请续跑。
+
+如果第一次运行在结果写回父会话前，进程就已经退出，即使子会话里保存了若干消息，Ink 仍会因缺少运行记录而拒绝续跑。它无法仅凭这些消息区分“还在运行”和“已经退出”。
+
+这项检查确认的是已有运行结束的记录。此刻是否有其他调用正在续跑，还需要第 3 节介绍的租约机制协调。
+
+找到这样的运行记录后，还需要核对本次运行条件是否与启动记录一致。
+
+### 2.4 怎样核对当前运行条件？
+
+确认已有运行记录后，`task` 工具还会整理本次检查采用的系统提示词、角色、工具等信息，与子会话的启动记录 `ChildLaunchRecord` 对照。主要检查如下：
+
+<div className="overflow-x-auto [&_table]:min-w-[32rem] [&_th:first-child]:w-36" role="region" aria-label="子代理续跑的条件检查，窄屏可横向滚动" tabIndex={0}>
+
+| 检查对象            | Ink 当前的处理                                                         |
+| ------------------- | ---------------------------------------------------------------------- |
+| Ink 版本            | 版本改变就拒绝跨版本续跑                                               |
+| 角色与系统提示词    | 角色必须仍存在，角色提示词及组装后的系统提示词需通过内容指纹比较       |
+| 提示词来源与扩展    | 核对项目约定和提示词文件、扩展提供的提示内容及扩展入口文件是否发生变化 |
+| 子代理工具集合      | 工具名称及来源要相同；新增工具也会构成变化                             |
+| 模型                | 沿用启动记录中的模型绑定；当前接入分组名称必须与记录一致               |
+| 工作目录或 worktree | 目录必须仍然可用；worktree 还需核对所属仓库、分支和提交历史            |
+
+</div>
+
+例如，之前的调查角色只能读取和搜索，现在给它增加了写文件工具，即使我们仍然只问登录测试，Ink 也会因工具集合发生变化而拒绝续跑。
+
+续跑时，`task` 工具会取得主 Agent 当前使用的系统提示词，并将其指纹与子代理启动时保存的指纹比较；不一致就拒绝续跑，避免用改变后的提示词继续处理旧历史。下面节选 [`child-launch.ts`](https://github.com/FishInSalt/ink/blob/main/src/core/child-launch.ts) 中的比较逻辑：
+
+```ts
+// 文件：src/core/child-launch.ts
+// 所在函数：validateChildContinuation，比较系统提示词的指纹。
+if (
+  sha256Hex(normalizeSystemText(current.systemText)) !== launch.system.sha256
+) {
+  reasons.push({
+    code: "system-drift",
+    message:
+      "the assembled system prompt changed since launch (see the per-source diffs below)",
+  });
+}
+```
+
+`current.systemText` 是主 Agent 当前使用的系统提示词，`launch.system.sha256` 是子代理启动时保存的指纹。比较结果不同，就向 `reasons` 加入 `system-drift` 拒绝原因。检查结束后，`task` 工具会将这些拒绝原因整理成工具错误结果，交回主 Agent，不会启动本次续跑。
+
+比较前，`normalizeSystemText` 会把格式恰好为 `- Date: YYYY-MM-DD` 的整行日期统一替换为固定内容，避免该行日期的变化单独触发 `system-drift`；其他文字仍参与比较。
+
+使用 worktree 时，Ink 会核对目录是否仍属于原仓库和原分支，以及提交历史是否承接创建时的基线。子代理后续的正常提交可以保留；目录已删除或检查不通过时，续跑会被拒绝。
+
+这些检查通过后，Ink 已经确认了子会话的归属、已有运行记录和当前运行条件。接下来还需要处理另一个问题：如果两个调用同时要求继续这个子会话，应该让谁开始运行？
+
+## 3. 怎样避免同一个子会话被同时续跑？
+
+### 3.1 怎样取得并释放子会话租约？
+
+两个 `task` 调用可能同时通过第 2 节的检查，并都要求继续子会话 C1。此时，还需要保证同一时刻只有一个调用续跑 C1。
+
+例如，两个调用都读到了 C1 中“已找到登录入口”的报告，一个检查现有测试，另一个补查需要新增的用例。若各自从这个位置追加消息，新消息可能形成不同分支，后续恢复时只会沿其中一条继续。
+
+`task` 工具通过**单写者租约**协调同一子会话的续跑：只有取得租约的调用，才能继续运行该子代理；在它持有租约期间，其他调用不能同时续跑该子会话。下面是 [`task.ts`](https://github.com/FishInSalt/ink/blob/main/src/core/tools/task.ts) 的相关节选：
+
+```ts
+// 文件：src/core/tools/task.ts
+// 所在函数：createTaskTool 返回的 execute，resume 分支。
+// 前面已通过子会话、运行条件与已有运行记录检查。
+const acquired = acquireChildLease(file.filePath, attemptId);
+if (!acquired.ok) {
+  return refuse(
+    `cannot resume child "${launch.childId}": ${acquired.message}\n${RESUME_REFUSAL_TAIL}`
+  );
+}
+const lease = acquired.lease;
+// ……省略本次取消控制器及相关变量的创建。
+try {
+  // ……启动心跳，重新打开子会话，修复历史，运行子代理并整理结果。
+} finally {
+  // ……省略取消信号监听的清理。
+  lease.release();
+}
+```
+
+`acquireChildLease` 按子会话文件申请租约，`attemptId` 标记本次申请。取得失败时，`task` 工具返回错误，不会启动本次续跑；取得后，正常完成、提前返回或抛出异常都会通过 `finally` 释放租约。
+
+[`child-lease.ts`](https://github.com/FishInSalt/ink/blob/main/src/core/child-lease.ts) 先检查本进程内是否已有调用占用该子会话。为协调不同 Ink 进程对同一子会话的续跑，每次调用会在子会话文件旁的租约目录中各自创建一份**租约申请文件**，记录进程信息和本次调用的 `attemptId`。随后，调用检查目录中是否存在其他仍有效或状态尚不能确认的申请；没有这类冲突，才取得租约。取得租约后，调用会保留自己的申请文件，供其他调用判断是否存在占用；释放租约时只删除自己的文件。
+
+这里先创建文件、再检查冲突，是为了让同时申请的调用能够发现彼此。如果先检查再创建，两个进程可能同时看到“没有其他申请”，随后都认为自己可以开始续跑。检查发现冲突时，调用会撤回自己的申请，随机等待片刻后重新申请。重试仍可能遇到冲突，因此 Ink 限制尝试次数；达到上限后，就返回 `busy`。
+
+如果进程突然退出，没有机会释放租约，申请文件会残留。对于能解析的同机申请文件，后续调用只有同时确认原进程已退出、文件已超过宽限期未更新，才会清理。
+
+本次 `task` 调用取得租约后，Ink 会启动定时检查，释放租约时停止，这就是这里的**心跳**。它会定期读取本次申请文件、核对 `attemptId`，并更新文件的修改时间；发现文件丢失或编号不符等异常时，就发出取消请求。
+
+子会话租约协调同一子会话的续跑过程；[中篇](/posts/coding-agent-10-concurrency/)介绍的文件锁协调源文件的写入。
+
+### 3.2 取得租约后，为什么还要重新读取历史？
+
+从第一次查找子会话，到本次调用取得租约之间，另一次续跑可能已经完成、写入新消息并释放租约。此时，本次调用虽然成功取得租约，第一次读取的历史却可能已经过时。因此，Ink 会在取得租约后**重新打开子会话**，让后续操作使用最新历史：
+
+```ts
+// 文件：src/core/tools/task.ts
+// 所在函数：createTaskTool 返回的 execute，持有租约后的 resume 分支。
+const reopened = findChildByLaunch(parentStore, check.childId);
+// ……拒绝重新查找失败、文件路径改变、启动记录改变或没有对话内容的情况。
+file = reopened.file;
+```
+
+`reopened.file` 是持有租约后重新读取的子会话。将 `file` 更新为它，后续历史检查和新消息追加都使用这份子会话。路径与启动记录的检查则确认，当前打开的仍是先前核对并取得租约的子会话。
+
+取得租约并重新打开子会话后，接下来要检查这份历史能否用于新一轮运行，以及中断留下的问题是否需要修复。
+
+## 4. 中断留下的历史，应该怎样修复？
+
+### 4.1 先检查工具调用与结果能否对应
+
+中断可能留下两类问题：会话文件的最后一行没有写完整，或者工具调用已经记录，却缺少对应结果。
+
+若子会话文件的末行损坏，Ink 在打开文件时会先忽略这一行，读取此前的完整记录。磁盘上的残片仍保留，等待后续修复。
+
+`buildContinuationHistory` 先取得本轮要交给模型的消息，再只读检查工具调用与结果的对应关系；检查通过后，才处理磁盘文件尾部。下面节选 [`child-resume.ts`](https://github.com/FishInSalt/ink/blob/main/src/core/child-resume.ts) 中的检查顺序：
+
+```ts
+// 文件：src/core/child-resume.ts
+// 所在函数：buildContinuationHistory，进入修复流程之前。
+const first = store.buildContext();
+const scan = scanToolPairs(first.messages);
+if (!scan.repairable) {
+  return {
+    ok: false,
+    problem: scan.problem ?? "the transcript is not continuable",
+  };
+}
+// ……省略修复说明的初始化。
+// 通过配对扫描后，才处理磁盘文件尾部。
+const torn = store.repairTornFinalLine();
+// ……省略文件尾部处理情况的记录。
+```
+
+配对扫描按消息顺序进行，只允许为历史末尾缺少结果的工具调用补齐记录。下面用 A、B 表示同一条模型回复里的两次工具调用：
+
+<div className="overflow-x-auto [&_table]:min-w-[34rem]" role="region" aria-label="工具调用与结果配对的处理，窄屏可横向滚动" tabIndex={0}>
+
+| 历史记录情况                                                     | 处理                                       |
+| ---------------------------------------------------------------- | ------------------------------------------ |
+| 调用 A、B，已记录 A 的结果，随后中断                             | 可以为 B 补上“结果未知”的错误结果          |
+| 调用 A、B，结果 B、A 都已记录                                    | 已完整配对，同一批结果不要求按调用顺序排列 |
+| 调用 A 尚无结果，后面已出现新用户消息或新模型回复                | 拒绝，不补历史中间的缺口                   |
+| 结果没有对应的先前调用，或调用 ID 重复、同一调用的结果被重复记录 | 拒绝，无法明确建立对应关系                 |
+
+</div>
+
+表中需要拒绝的情况，会在扫描阶段返回错误，不会修改子会话文件。
+
+### 4.2 处理文件尾部，再补齐缺失的工具结果
+
+配对检查通过后，Ink 才进入修复流程。子会话文件采用 JSONL 格式，每行保存一条记录；续跑还要追加新消息，因此需要先处理文件尾部，避免新记录与最后一行连在一起。`repairTornFinalLine` 的处理分为两种情况，实现见 [`store.ts`](https://github.com/FishInSalt/ink/blob/main/src/core/session/store.ts)：
+
+- 最后一行是无效残片，就从这行起始位置截断，保留此前完整记录。
+- 最后一行已经是一条有效记录，只缺换行符，就补上换行，保留这条记录。
+
+如果最后一条记录没有写完，文件末尾可能只留下 `{"type":"message"` 这样的残片。由于残片末尾没有换行符，直接追加新消息会让两条内容连在一起，仍然无法解析。因此，继续追加之前，需要先清除这段残片。
+
+文件尾部处理完成后，再补齐缺失的工具结果。沿用 4.1 节的例子，如果 A 的结果已经记录，B 的结果缺失，Ink 会为 B 写入一条工具结果，明确说明“原结果未记录，实际执行情况未知”。下面节选 `buildContinuationHistory` 中的补齐逻辑：
+
+```ts
+// 文件：src/core/child-resume.ts
+// 所在函数：buildContinuationHistory，文件尾部修复之后。
+if (scan.missing.length > 0) {
+  store.appendMessage({
+    role: "toolResult",
+    results: scan.missing.map(({ id, name }) => ({
+      toolCallId: id,
+      toolName: name,
+      content: REPAIR_RESULT_MARKER,
+      isError: true,
+    })),
+  });
+  // ……省略补齐情况的说明记录。
+  const rebuilt = store.buildContext();
+  // ……省略返回重建后的消息与修复说明。
+}
+// ……省略没有缺失结果时的返回。
+```
+
+补齐结果沿用 B 的 `toolCallId` 和工具名称，使它能与原调用对应。`REPAIR_RESULT_MARKER` 保存上述“结果未知”的固定说明；`isError: true` 将它标为错误结果，提醒模型不能把它当作成功依据。工具实际上是否执行成功，仍需重新确认。Ink 不会在修复历史时自动重跑原工具调用，以免重复执行已经生效的操作。
+
+`appendMessage` 会将补齐的工具结果保存到本地子会话文件。随后，Ink 通过 `buildContext` 重新整理本轮要交给模型的历史，使其中包含“结果未知”的说明。由于这条结果已经保存，后续恢复也能继续使用。
+
+## 5. 怎样带着旧历史，开始一次新的运行？
+
+历史准备完成后，`task` 工具将这份历史与本次 `prompt` 提供的新要求一起交给 `runSubagent`，开始新一轮运行。下面节选 [`task.ts`](https://github.com/FishInSalt/ink/blob/main/src/core/tools/task.ts) 中与新要求、旧历史和消息保存有关的参数，其他运行配置省略：
+
+```ts
+// 文件：src/core/tools/task.ts
+// 所在函数：createTaskTool 返回的 execute，resume 分支启动子代理的位置。
+const outcome = await runSubagent({
+  // ……省略模型、系统提示词和工具等参数。
+  prompt: String(args.prompt),
+  // ……省略取消信号与超时参数。
+  session: file.store,
+  initialHistory: history.messages,
+  // ……省略上下文估算参数。
+  onMessage: (message: AgentMessage) => file.store.appendMessage(message),
+  // ……省略工具执行前检查和事件转发回调；原实现仍会传入它们。
+});
+```
+
+`initialHistory` 接收第 4 节整理后的旧消息，`prompt` 接收本次的新任务要求。`runSubagent` 以旧消息作为初始历史，再将新要求作为一条用户消息加入。
+
+`session` 指向原来的子会话存储对象。新消息产生时，`onMessage` 会调用 `appendMessage`，将新的任务要求、模型回复和工具结果继续保存到同一个子会话文件。
+
+以本文的登录调查为例，假设历史未经过压缩，也不需要补齐工具结果，下一次模型请求中的消息顺序如下。这是教学示意，工具调用和结果省略了内部字段：
+
+```text
+用户：调查登录入口与失败处理逻辑
+模型：请求搜索、读取相关源码
+工具结果：相关源码与搜索结果
+模型：登录入口是 src/auth/login.ts，需关注计数与清零条件
+用户：继续检查现有登录测试……先重新确认相关文件的当前内容
+```
+
+之前的调查和报告作为上下文保留，新要求追加在后面。模型据此开始新一轮请求与工具执行。
+
+### 5.1 避免把旧报告当成本次结果
+
+子代理运行结束时，Ink 通过 [`subagent.ts`](https://github.com/FishInSalt/ink/blob/main/src/core/subagent.ts) 中的 `finalAssistantText` 提取返回文本。这个函数从内存中的历史消息列表末尾向前查找，找到包含非空文本的模型回复后，提取其中的文字。
+
+续跑时，历史中既有之前的调查和报告，也有本次新增的消息。如果本次尚未产生回复就报错结束，直接从完整历史中查找，就可能取到上次的报告，把旧任务的结果作为本次结果返回。
+
+因此，Ink 会先排除本次启动时恢复的旧消息，再从本次新增消息中提取返回文本。`runSubagent` 用 `seeded` 集合记录这些旧消息，整理返回文本时通过它过滤完整的 `history`：
+
+```ts
+// 文件：src/core/subagent.ts
+// 所在函数：runSubagent 内部的 settled，提取本次运行的文本。
+const attemptMessages =
+  seeded === undefined
+    ? history
+    : history.filter(message => !seeded.has(message));
+return {
+  // ……省略结束状态和异常原因。
+  text: finalAssistantText(attemptMessages),
+  // ……省略本次回复次数、用量和健康状态。
+};
+```
+
+这样，`finalAssistantText` 接收到的只有本次新增消息，本次没有可用文本时就返回 `undefined`。这一步过滤只影响返回文本的选择，不会删除子会话中的旧记录；旧历史仍用于模型上下文。
+
+### 5.2 本次结果怎样返回和保存？
+
+本次运行结束后，`task` 工具会根据提取到的文本和结束状态生成工具结果，交回主 Agent。没有可用文本时，也会按结束状态给出相应说明。
+
+这次调用还会生成一份新的 `TaskRecord`，沿用同一个 `childId`，使用新的 `attemptId`，并随工具结果保存到父会话。
+
+如果子代理使用 worktree，本次运行产生的文件修改仍留在原工作副本中，目录和分支也会保留。需要整合这些修改时，再由主 Agent 检查并处理。
+
+## 6. 从保存对话，到继续执行
+
+回到开头的登录测试调查，Ink 在核对运行条件、取得租约并准备好历史后，会将原来的子会话历史与新的调查要求一起交给子代理，开始新一轮运行。
+
+旧历史提供之前的调查过程和报告；新的测试调查仍需子代理检查当前源码和测试文件，再给出本次结论。
+
+至此，第 10 章从[委派任务](/posts/coding-agent-10-subagents/)、[并发协作](/posts/coding-agent-10-concurrency/)走到了已有子任务的继续执行。接下来的 [Skills 篇](/posts/coding-agent-11-skills/)讨论怎样把任务相关的工作说明组织为技能，供 Agent 按需发现、读取和使用。

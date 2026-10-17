@@ -1,7 +1,7 @@
 ---
 author: 折腾客
 pubDatetime: 2026-10-10T15:35:32Z
-modDatetime: 2026-10-11T14:00:59Z
+modDatetime: 2026-10-17T16:51:26Z
 title: "Coding Agent 原理与实践 10（上）：子代理——怎样委派任务并回收结果"
 featured: false
 draft: false
@@ -577,6 +577,8 @@ const outcome = await runSubagent({
 - 同一个子会话同时只能有一个运行向它写入历史，避免两次续跑混用同一份消息。
 
 通过检查后，实际文件内容仍可能已发生变化，子代理需要按任务重新读取和确认。
+
+运行条件怎样核对、同一子会话怎样避免被同时续跑，以及中断留下的历史怎样修复，详见[下篇：子代理续跑](/posts/coding-agent-10-child-resume/)。
 
 ## 5. 从一次委派，到多个子代理协作
 
