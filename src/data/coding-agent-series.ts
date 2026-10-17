@@ -107,7 +107,7 @@ export const codingAgentChapters = [
   },
   {
     number: "14",
-    title: "用量统计——一次任务消耗了多少 Token",
+    title: "用量统计——Token 消耗与成本估算",
     question: "怎样统计模型调用、上下文压缩和子代理的用量，并估算费用？",
     postId: "coding-agent-14-usage",
   },

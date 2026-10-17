@@ -1,0 +1,139 @@
+---
+import "./series-visual.css";
+
+const sources = [
+  {
+    title: "主 Agent 回复",
+    report: "回复携带统一的 usage",
+    record: "保存 assistant 消息",
+    bucket: "parent",
+  },
+  {
+    title: "主会话生成摘要",
+    report: "生成压缩摘要或分支摘要，返回 usage",
+    record: "成功后保存摘要记录",
+    bucket: "summarizer",
+  },
+  {
+    title: "子代理本次运行",
+    report: "账本累计任务回复与上下文压缩的用量",
+    record: "随工具结果保存 TaskRecord",
+    bucket: "child",
+  },
+];
+---
+
+<figure
+  class="usage-flow series-visual not-prose"
+  aria-labelledby="usage-flow-title"
+>
+  <figcaption id="usage-flow-title">用量怎样汇入主会话？</figcaption>
+  <div class="sources">
+    {
+      sources.map(source => (
+        <section class="source" aria-label={source.title}>
+          <p class="source-title">{source.title}</p>
+          <ol>
+            <li>{source.report}</li>
+            <li>{source.record}</li>
+          </ol>
+          <p class="bucket">
+            汇入 <code>{source.bucket}</code>
+          </p>
+        </section>
+      ))
+    }
+  </div>
+  <div class="aggregate">
+    <strong>从主会话的全部条目计算 total</strong>
+    <p>按来源累计数量，同时按产生用量的模型分组，用于费用估算。</p>
+  </div>
+  <p class="caption">
+    从上向下阅读。子代理上下文压缩的用量已经包含在 child 中，不再计入主会话的
+    summarizer。图示表示记录成功保存后的归属；缺失记录的限制见第 4.5 节。
+  </p>
+</figure>
+
+<style>
+  .usage-flow {
+    margin: 2rem 0;
+    padding: 1.25rem;
+    border: 1px solid var(--series-rule);
+    border-radius: 0.8rem;
+    background: var(--series-paper);
+    color: var(--series-ink);
+    container-type: inline-size;
+  }
+  figcaption {
+    margin-bottom: 1rem;
+    font-weight: 700;
+    line-height: 1.6;
+  }
+  .sources {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.75rem;
+  }
+  .source {
+    min-width: 0;
+    border: 1px solid var(--series-rule);
+    border-radius: 0.5rem;
+    padding: 0.9rem;
+    overflow-wrap: anywhere;
+  }
+  .source-title {
+    margin: 0 0 0.75rem;
+    color: var(--series-blue);
+    font-size: 0.95rem;
+    font-weight: 700;
+    line-height: 1.65;
+  }
+  ol {
+    list-style: decimal;
+    margin: 0;
+    padding-left: 1.2rem;
+    font-size: 0.85rem;
+    line-height: 1.7;
+  }
+  li + li {
+    margin-top: 0.5rem;
+  }
+  li::marker {
+    color: var(--series-blue);
+  }
+  .bucket {
+    margin: 0.85rem 0 0;
+    padding-top: 0.75rem;
+    border-top: 1px solid var(--series-rule);
+    color: var(--series-feedback);
+    font-size: 0.85rem;
+    line-height: 1.65;
+  }
+  .aggregate {
+    margin-top: 1rem;
+    padding: 1rem;
+    border: 1px solid var(--series-blue);
+    border-radius: 0.5rem;
+    background: var(--series-blue-wash);
+  }
+  .aggregate strong {
+    line-height: 1.7;
+  }
+  .aggregate p,
+  .caption {
+    font-size: 0.85rem;
+    line-height: 1.7;
+  }
+  .aggregate p {
+    margin: 0.4rem 0 0;
+  }
+  .caption {
+    margin: 1rem 0 0;
+    color: var(--series-secondary);
+  }
+  @container (max-width: 560px) {
+    .sources {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>

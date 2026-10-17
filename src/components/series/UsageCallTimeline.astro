@@ -1,0 +1,736 @@
+---
+import "./series-visual.css";
+import {
+  loginInputPieces,
+  loginModelCalls,
+  loginCallReports,
+  loginCallTotals,
+} from "@/data/usage-login-example";
+
+interface Props {
+  id?: string;
+  describedBy?: string;
+}
+
+const { id = "login-usage-timeline", describedBy } = Astro.props;
+const formatTokens = (tokens: number) => tokens.toLocaleString("en-US");
+const runningTotals = loginCallReports.map((_, index) =>
+  loginCallReports.slice(0, index + 1).reduce(
+    (totals, report) => ({
+      inputTokens: totals.inputTokens + report.inputTokens,
+      cacheReadTokens: totals.cacheReadTokens + report.cacheReadTokens,
+      outputTokens: totals.outputTokens + report.outputTokens,
+    }),
+    { inputTokens: 0, cacheReadTokens: 0, outputTokens: 0 }
+  )
+);
+---
+
+<figure
+  class="usage-timeline series-visual not-prose"
+  aria-labelledby={`${id}-title`}
+  aria-describedby={describedBy}
+  data-usage-timeline
+  data-no-copy
+>
+  <figcaption id={`${id}-title`}>一次登录排查任务，四次模型调用</figcaption>
+  <nav aria-label="选择模型调用">
+    <div class="call-tabs" data-call-tabs>
+      {
+        loginModelCalls.map((call, index) => (
+          <a
+            id={`${id}-tab-${index}`}
+            href={`#${id}-step-${index}`}
+            class="call-tab"
+            data-call-index={index}
+          >
+            <span class="call-number">第 {index + 1} 次</span>
+            <span>{call.title}</span>
+          </a>
+        ))
+      }
+    </div>
+  </nav>
+  <p
+    class="screen-reader-only"
+    aria-live="polite"
+    aria-atomic="true"
+    data-usage-status
+  >
+  </p>
+
+  {
+    loginModelCalls.map((call, index) => {
+      const report = loginCallReports[index];
+      const totals =
+        index === loginModelCalls.length - 1
+          ? loginCallTotals
+          : runningTotals[index];
+      const inputParts = loginInputPieces.slice(0, call.inputPieceCount);
+      const serviceReport = {
+        prompt_tokens: report.totalInput,
+        prompt_cache_hit_tokens: report.cacheReadTokens,
+        prompt_cache_miss_tokens: report.inputTokens,
+        completion_tokens: report.outputTokens,
+      };
+      const inkReport = {
+        inputTokens: report.inputTokens,
+        outputTokens: report.outputTokens,
+        ...(report.cacheReadTokens > 0
+          ? { cacheReadTokens: report.cacheReadTokens }
+          : {}),
+      };
+
+      return (
+        <section
+          id={`${id}-step-${index}`}
+          class="call-panel"
+          aria-labelledby={`${id}-heading-${index}`}
+          data-call-panel
+          data-call-title={`${call.requestTitle}，模型回复${call.responseTitle}`}
+        >
+          <p class="call-heading" id={`${id}-heading-${index}`}>
+            第 {index + 1} 次：{call.requestTitle}，模型回复{call.responseTitle}
+          </p>
+
+          <section class="request-stage" aria-label="本次请求">
+            <div class="stage-content">
+              <p class="section-heading">本次请求</p>
+              {index === 0 && (
+                <p class="request-task">
+                  <strong>用户任务：</strong>
+                  {loginInputPieces[1].detail}
+                </p>
+              )}
+              <section class="history-section" aria-label="本次发送的完整历史">
+                <p class="subsection-heading">
+                  本次发送的完整历史（{inputParts.length} 项）
+                </p>
+                <ol class="input-pieces">
+                  {inputParts.map((part, partIndex) => (
+                    <li>
+                      <span>{part.label}</span>
+                      <strong>{formatTokens(part.tokens)}</strong>
+                      <small
+                        class:list={[
+                          partIndex < call.cachedPieceCount
+                            ? "hit-label"
+                            : "plain-label",
+                        ]}
+                      >
+                        {partIndex < call.cachedPieceCount ? "命中" : "未命中"}
+                      </small>
+                    </li>
+                  ))}
+                </ol>
+              </section>
+            </div>
+
+            <div class="usage-row input-usage" aria-label="本次输入用量">
+              <p>本次输入用量</p>
+              <dl class="usage-values">
+                <div>
+                  <>
+                    <dt class="plain-label">普通输入</dt>
+                    <dd>{formatTokens(report.inputTokens)}</dd>
+                  </>
+                </div>
+                <div>
+                  <>
+                    <dt class="hit-label">缓存读取</dt>
+                    <dd>{formatTokens(report.cacheReadTokens)}</dd>
+                  </>
+                </div>
+                <div>
+                  <>
+                    <dt>完整输入</dt>
+                    <dd>{formatTokens(report.totalInput)}</dd>
+                  </>
+                </div>
+              </dl>
+              <small>Token</small>
+            </div>
+          </section>
+
+          <section class="response-stage" aria-label="本次模型回复">
+            <div class="stage-content">
+              <p class="section-heading">本次模型回复</p>
+              {call.responseDetail && (
+                <p class="response-detail">{call.responseDetail}</p>
+              )}
+              {/* prettier-ignore */}
+              <pre class="response-preview"><code>{call.outputPreview}</code></pre>
+            </div>
+            <div class="usage-row output-usage" aria-label="本次模型输出">
+              <p>本次模型输出</p>
+              <strong>
+                {formatTokens(report.outputTokens)} <small>Token</small>
+              </strong>
+            </div>
+          </section>
+
+          <section class="agent-action" aria-label={call.actionTitle}>
+            <p class="flow-heading">{call.actionTitle}</p>
+            {call.toolResultTokens > 0 ? (
+              <>
+                <p class="tool-result">
+                  返回{call.toolResultLabel}，共{" "}
+                  <strong>
+                    {formatTokens(call.toolResultTokens)} <small>Token</small>
+                  </strong>
+                  。
+                </p>
+                <p class="next-input-note">
+                  结果将在第 {index + 2} 次计入输入，不属于本次模型回复。
+                </p>
+              </>
+            ) : (
+              <p class="completion-note">任务结束，本次没有新的工具执行。</p>
+            )}
+            {index < loginModelCalls.length - 1 && (
+              <a
+                href={`#${id}-step-${index + 1}`}
+                class="next-call-link"
+                data-select-call={index + 1}
+              >
+                <span>看第 {index + 2} 次输入如何形成</span>
+                <span class="next-equation">
+                  {formatTokens(report.totalInput)} ＋{" "}
+                  {formatTokens(report.outputTokens)} ＋{" "}
+                  {formatTokens(call.toolResultTokens)} ＝{" "}
+                  {formatTokens(loginCallReports[index + 1].totalInput)}
+                </span>
+              </a>
+            )}
+          </section>
+
+          <div class="running-totals" aria-label={`截至第 ${index + 1} 次累计`}>
+            <p class="totals-heading">
+              截至第 {index + 1} 次累计 <small>图中调用，单位 Token</small>
+            </p>
+            <dl>
+              <div>
+                <>
+                  <dt>普通输入</dt>
+                  <dd>{formatTokens(totals.inputTokens)}</dd>
+                </>
+              </div>
+              <div>
+                <>
+                  <dt>缓存读取</dt>
+                  <dd>{formatTokens(totals.cacheReadTokens)}</dd>
+                </>
+              </div>
+              <div>
+                <>
+                  <dt>输出</dt>
+                  <dd>{formatTokens(totals.outputTokens)}</dd>
+                </>
+              </div>
+            </dl>
+          </div>
+
+          <section
+            class="report-section"
+            aria-label="DeepSeek 原始字段与 Ink 统一字段"
+          >
+            <p class="section-heading">DeepSeek 原始字段与 Ink 统一字段</p>
+            <div class="report-columns">
+              <section aria-label="DeepSeek 报告字段示意">
+                <h5>DeepSeek 报告字段示意</h5>
+                {/* prettier-ignore */}
+                <pre><code>{JSON.stringify(serviceReport, null, 2)}</code></pre>
+              </section>
+              <section aria-label="Ink 统一字段">
+                <h5>Ink 统一字段</h5>
+                {/* prettier-ignore */}
+                <pre><code>{JSON.stringify(inkReport, null, 2)}</code></pre>
+              </section>
+            </div>
+          </section>
+        </section>
+      );
+    })
+  }
+  <p class="write-note">缓存写入：DeepSeek 未单独报告。</p>
+</figure>
+
+<script>
+  function initializeUsageTimelines() {
+    document
+      .querySelectorAll<HTMLElement>("[data-usage-timeline]")
+      .forEach(root => {
+        if (root.dataset.enhanced === "true") return;
+        const tabs = Array.from(
+          root.querySelectorAll<HTMLAnchorElement>("[data-call-index]")
+        );
+        const panels = Array.from(
+          root.querySelectorAll<HTMLElement>("[data-call-panel]")
+        );
+        const tabList = root.querySelector<HTMLElement>("[data-call-tabs]");
+        const status = root.querySelector<HTMLElement>("[data-usage-status]");
+        if (!tabList || tabs.length === 0 || tabs.length !== panels.length)
+          return;
+
+        let selected = 0;
+        const selectCall = (
+          index: number,
+          focusTab = false,
+          announce = true
+        ) => {
+          selected = index;
+          tabs.forEach((tab, tabIndex) => {
+            const active = tabIndex === index;
+            tab.setAttribute("aria-selected", String(active));
+            tab.tabIndex = active ? 0 : -1;
+            panels[tabIndex].hidden = !active;
+          });
+          if (focusTab) tabs[index].focus();
+          if (announce && status) {
+            status.textContent = `正在查看第 ${index + 1} 次调用：${panels[index].dataset.callTitle}。`;
+          }
+        };
+
+        tabList.setAttribute("role", "tablist");
+        tabList.setAttribute("aria-label", "登录排查中的四次模型调用");
+        tabList.setAttribute("aria-orientation", "horizontal");
+        tabs.forEach((tab, index) => {
+          tab.setAttribute("role", "tab");
+          tab.setAttribute("aria-controls", panels[index].id);
+          panels[index].setAttribute("role", "tabpanel");
+          panels[index].setAttribute("aria-labelledby", tab.id);
+          panels[index].tabIndex = 0;
+          tab.addEventListener("click", event => {
+            if (
+              event.metaKey ||
+              event.ctrlKey ||
+              event.shiftKey ||
+              event.altKey
+            )
+              return;
+            event.preventDefault();
+            selectCall(index);
+          });
+          tab.addEventListener("keydown", event => {
+            let next = selected;
+            if (event.key === "ArrowRight") next = (selected + 1) % tabs.length;
+            else if (event.key === "ArrowLeft")
+              next = (selected - 1 + tabs.length) % tabs.length;
+            else if (event.key === "Home") next = 0;
+            else if (event.key === "End") next = tabs.length - 1;
+            else if (event.key === " " || event.key === "Enter") next = index;
+            else return;
+            event.preventDefault();
+            selectCall(next, true);
+          });
+        });
+        root
+          .querySelectorAll<HTMLAnchorElement>("[data-select-call]")
+          .forEach(link => {
+            link.addEventListener("click", event => {
+              if (
+                event.metaKey ||
+                event.ctrlKey ||
+                event.shiftKey ||
+                event.altKey
+              )
+                return;
+              event.preventDefault();
+              selectCall(Number(link.dataset.selectCall), true);
+            });
+          });
+
+        root.dataset.enhanced = "true";
+        const linkedPanel = panels.findIndex(
+          panel => `#${panel.id}` === window.location.hash
+        );
+        selectCall(linkedPanel >= 0 ? linkedPanel : 0, false, false);
+      });
+  }
+
+  initializeUsageTimelines();
+  document.addEventListener("astro:page-load", initializeUsageTimelines);
+</script>
+
+<style>
+  .usage-timeline {
+    margin: 2rem 0;
+    padding: 1.25rem;
+    border: 1px solid var(--series-rule);
+    border-radius: 0.8rem;
+    background: var(--series-paper);
+    color: var(--series-ink);
+    container-type: inline-size;
+  }
+  .usage-timeline *,
+  .usage-timeline *::before,
+  .usage-timeline *::after {
+    box-sizing: border-box;
+  }
+  figcaption {
+    margin-bottom: 1rem;
+    font-weight: 700;
+    font-size: 1.05rem;
+    line-height: 1.6;
+  }
+  p {
+    margin: 0;
+    line-height: 1.65;
+  }
+  .call-tabs {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 0.4rem;
+  }
+  .call-tab {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 0.2rem;
+    min-height: 3.7rem;
+    padding: 0.55rem 0.6rem;
+    border: 1px solid var(--series-rule);
+    border-radius: 0.3rem;
+    color: var(--series-ink);
+    font-size: 0.8rem;
+    text-decoration: none;
+    overflow-wrap: anywhere;
+  }
+  .call-number {
+    color: var(--series-secondary);
+    font-size: 0.72rem;
+  }
+  .call-tab:hover,
+  .call-tab[aria-selected="true"] {
+    border-color: var(--series-blue);
+    background: var(--series-blue-wash);
+  }
+  .call-tab[aria-selected="true"] {
+    font-weight: 700;
+  }
+  .call-tab[aria-selected="true"] .call-number {
+    color: var(--series-blue);
+  }
+  a:focus-visible,
+  .call-panel:focus-visible {
+    outline: 2px solid var(--series-blue);
+    outline-offset: 3px;
+  }
+  .call-panel {
+    margin-top: 1rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--series-rule);
+  }
+  .call-panel[hidden] {
+    display: none !important;
+  }
+  .call-heading {
+    margin-bottom: 0.9rem;
+    font-size: 0.95rem;
+    font-weight: 700;
+  }
+  .section-heading {
+    margin-bottom: 0.75rem;
+    font-size: 0.88rem;
+    font-weight: 700;
+  }
+  .request-task {
+    margin-bottom: 1rem;
+    font-size: 0.8rem;
+  }
+  .request-task strong {
+    font-weight: 500;
+  }
+  .request-stage,
+  .response-stage {
+    min-width: 0;
+    border: 1px solid var(--series-rule);
+    border-top: 3px solid var(--stage-accent);
+    border-radius: 0.3rem;
+    overflow: hidden;
+    background: var(--series-paper);
+  }
+  .request-stage {
+    --stage-accent: var(--series-feedback);
+  }
+  .response-stage {
+    --stage-accent: var(--series-blue);
+    margin-top: 1.25rem;
+  }
+  .stage-content {
+    padding: 1rem;
+  }
+  .history-section {
+    min-width: 0;
+  }
+  .subsection-heading {
+    margin-bottom: 0.55rem;
+    color: var(--series-secondary);
+    font-size: 0.75rem;
+  }
+  .input-pieces {
+    width: 100%;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+  .input-pieces li {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto 2.5rem;
+    align-items: baseline;
+    gap: 0.5rem;
+    padding: 0.4rem 0;
+    border-top: 1px solid var(--series-rule);
+    font-size: 0.75rem;
+    line-height: 1.6;
+  }
+  .input-pieces strong {
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+  }
+  .input-pieces small {
+    font-size: 0.68rem;
+    text-align: right;
+  }
+  .hit-label {
+    color: var(--series-blue);
+  }
+  .plain-label {
+    color: var(--series-feedback);
+  }
+  .usage-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.65rem 1rem;
+    padding: 0.8rem 1rem;
+    border-top: 1px solid
+      color-mix(in srgb, var(--stage-accent) 45%, var(--series-rule));
+    background: color-mix(in srgb, var(--stage-accent) 9%, var(--series-paper));
+  }
+  .usage-row > p {
+    font-size: 0.78rem;
+    font-weight: 700;
+  }
+  .usage-row > small,
+  .usage-row > strong small {
+    color: var(--series-secondary);
+    font-size: 0.68rem;
+    font-weight: 400;
+  }
+  .usage-values {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 1rem;
+    margin: 0;
+  }
+  .usage-values > div {
+    min-width: 0;
+  }
+  .usage-values dt {
+    font-size: 0.72rem;
+  }
+  .usage-values dd {
+    margin: 0;
+    font-size: 1rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+  }
+  .response-detail {
+    margin-bottom: 0.5rem;
+    font-size: 0.8rem;
+  }
+  pre {
+    margin: 0;
+    padding: 0.65rem;
+    background: var(--series-canvas);
+    border-radius: 0.2rem;
+    font-size: 0.72rem;
+    line-height: 1.65;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  pre code {
+    display: block;
+    padding: 0;
+    border-radius: 0;
+    background: transparent;
+    color: var(--series-ink);
+    font-size: inherit;
+  }
+  .response-preview {
+    padding: 0.75rem;
+    border: 1px solid var(--series-rule);
+    background: transparent;
+  }
+  .output-usage > strong {
+    font-size: 1rem;
+    font-variant-numeric: tabular-nums;
+  }
+  .agent-action {
+    min-width: 0;
+    margin-top: 1.25rem;
+    padding: 0.1rem 0 0 0.85rem;
+    border-left: 2px solid var(--series-feedback);
+  }
+  .flow-heading {
+    font-size: 0.8rem;
+    font-weight: 700;
+  }
+  .tool-result {
+    margin-top: 0.35rem;
+    font-size: 0.8rem;
+  }
+  .tool-result strong {
+    font-variant-numeric: tabular-nums;
+  }
+  .tool-result small {
+    color: var(--series-secondary);
+    font-size: 0.68rem;
+    font-weight: 400;
+  }
+  .next-input-note,
+  .completion-note {
+    margin-top: 0.3rem;
+    color: var(--series-secondary);
+    font-size: 0.73rem;
+  }
+  .next-call-link {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.25rem 0.7rem;
+    min-height: 2.75rem;
+    margin-top: 0.35rem;
+    padding: 0.5rem 0;
+    color: var(--series-blue);
+    font-size: 0.77rem;
+    text-underline-offset: 0.2em;
+  }
+  .next-equation {
+    font-variant-numeric: tabular-nums;
+  }
+  .running-totals {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.4rem 1rem;
+    margin-top: 0.75rem;
+    padding: 0.65rem 0;
+    border-top: 1px solid var(--series-rule);
+  }
+  .totals-heading {
+    font-size: 0.78rem;
+    font-weight: 500;
+  }
+  .totals-heading small {
+    display: inline-block;
+    margin-left: 0.3rem;
+    color: var(--series-secondary);
+    font-size: 0.68rem;
+    font-weight: 400;
+  }
+  .running-totals dl {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem 0.8rem;
+    margin: 0;
+  }
+  .running-totals dl > div {
+    display: flex;
+    align-items: baseline;
+    gap: 0.35rem;
+  }
+  .running-totals dt {
+    color: var(--series-secondary);
+    font-size: 0.72rem;
+  }
+  .running-totals dd {
+    margin: 0;
+    font-size: 0.83rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+  }
+  .report-section {
+    margin-top: 0.5rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--series-rule);
+  }
+  .report-columns {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.7rem;
+    margin-top: 0.25rem;
+  }
+  h5 {
+    margin: 0 0 0.4rem;
+    font-size: 0.8rem;
+    line-height: 1.6;
+  }
+  .write-note {
+    margin-top: 0.25rem;
+    color: var(--series-secondary);
+    font-size: 0.72rem;
+  }
+  .screen-reader-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
+  }
+  @container (max-width: 590px) {
+    .stage-content {
+      padding: 0.8rem;
+    }
+    .usage-row {
+      padding: 0.75rem 0.8rem;
+    }
+    .usage-values {
+      width: 100%;
+      justify-content: space-between;
+      gap: 0.4rem;
+    }
+    .input-usage > small {
+      margin-left: auto;
+    }
+    .report-columns {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+  @container (max-width: 390px) {
+    .call-tabs {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    .call-tab {
+      min-height: 3.5rem;
+    }
+    .usage-values > div {
+      display: block;
+    }
+    .running-totals dl {
+      width: 100%;
+      justify-content: space-between;
+      gap: 0.35rem;
+    }
+    .running-totals dl > div {
+      display: block;
+    }
+    .input-pieces li {
+      gap: 0.3rem;
+      grid-template-columns: minmax(0, 1fr) auto 2.2rem;
+    }
+  }
+  @media (max-width: 400px) {
+    .usage-timeline {
+      padding: 0.8rem;
+    }
+  }
+</style>

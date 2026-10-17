@@ -262,6 +262,8 @@ const ogImage = ogImageUrl
     const codeBlocks = Array.from(document.querySelectorAll("pre"));
 
     for (const codeBlock of codeBlocks) {
+      if (codeBlock.closest("[data-no-copy]")) continue;
+
       const wrapper = document.createElement("div");
       wrapper.style.position = "relative";
 
