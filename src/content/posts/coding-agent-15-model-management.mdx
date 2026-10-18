@@ -1,0 +1,756 @@
+---
+author: 折腾客
+pubDatetime: 2026-10-18T06:37:29Z
+modDatetime: 2026-10-18T06:37:29Z
+title: "Coding Agent 原理与实践 15：模型管理——多家大模型提供商的配置与切换"
+featured: false
+draft: false
+tags:
+  - Coding Agent
+  - ink
+  - Agent 原理
+description: 沿着登录、选择和使用模型的过程，解释 Ink 怎样分别保存多家大模型提供商的凭据、汇集候选模型、应用切换和适配能力差异，以及怎样保留模型选择。
+---
+
+import ModelSelectionFlow from "@/components/series/ModelSelectionFlow.astro";
+
+## 1. 两家模型服务，一个选择入口
+
+在 Ink 中，我们希望既能使用 OpenAI 的模型，也能使用 DeepSeek 的模型，并在同一段对话中按需要切换。两家服务有不同的登录方式和凭据，**Ink 怎样分别管理这些配置，并通过同一个入口完成模型选择和切换？**
+
+本文从两家的首次登录开始，接着选择并切换模型，再看能力差异和选择的保存范围，最后补充公司模型网关的接入。源码解析将跟随这些操作，说明凭据怎样保存、候选模型怎样取得，以及用户的选择怎样应用到后续执行。
+
+[第 02 篇上篇](/posts/coding-agent-02-model-protocol/)以 OpenAI 的 Chat Completions API 为例，讲解一个模型接入对象怎样转换消息、发出请求；[第 02 篇下篇](/posts/coding-agent-02-streaming/)继续介绍流式回复的接收与组装。本文关注的是：用户选定模型后，Ink 怎样找到并配置相应的模型接入对象。
+
+## 2. 先登录：两家的凭据怎样同时保留？
+
+首先完成两家的登录。本例通过 ChatGPT 账号使用 OpenAI 模型，通过 API Key 使用 DeepSeek。下面看 Ink 怎样识别这两种登录方式、分别保存凭据，并在后续调用时找到对应的凭据。
+
+### 2.1 指定接入分组，选择登录方式
+
+Ink 用**接入分组**区分不同的模型接入方式，每个分组都有一个内部名称。本例中，`openai-codex` 表示通过 ChatGPT 账号接入，`deepseek` 表示通过 DeepSeek 的 API 接入。它们不仅区分登录方式，也会在后面选择模型、取得服务配置时继续使用。
+
+用户在 `/login` 后指定分组名称，Ink 就能确定执行哪种登录流程：
+
+```text
+/login openai-codex
+/login deepseek
+```
+
+第一条命令引导用户登录 ChatGPT，取得 OAuth 登录凭据；第二条命令让用户输入 DeepSeek 的 API Key。分组与登录方式的对应关系记录在 [`LOGIN_TARGETS`](https://github.com/FishInSalt/ink/blob/main/src/provider/login-targets.ts)中。
+
+```ts
+// src/provider/login-targets.ts — LOGIN_TARGETS 节选。
+// 仅保留本例两项的 family、method；其他字段和接入分组省略。
+export const LOGIN_TARGETS: readonly LoginTarget[] = [
+  {
+    family: "openai-codex",
+    method: "oauth",
+  },
+  {
+    family: "deepseek",
+    method: "api_key",
+  },
+];
+```
+
+`family` 是接入分组名称，`method` 指定登录方式。用户执行 `/login deepseek` 时，命令处理代码通过 `loginTargetFor` 查到 `deepseek` 对应的条目，再根据 `method: "api_key"` 提示用户输入 Key；`openai-codex` 对应的 `method` 则是 `"oauth"`，因此进入 ChatGPT 账号登录流程。
+
+这里的分组表示接入方式，并不总与大模型提供商一一对应。例如，Ink 还有一个 `openai` 分组，用于 OpenAI API Key 接入；它与本例的 ChatGPT 登录入口使用不同配置。
+
+### 2.2 分别保存两家服务的凭据
+
+用户完成 ChatGPT 账号登录后，Ink 会取得 OAuth 凭据；通过 DeepSeek 登录入口输入的 API Key，也需要保存下来，供后续调用模型时使用。两家的凭据应分别保留，这样用户切换模型时就不必重新登录，保存 DeepSeek Key 时也不会丢掉已有的 ChatGPT 登录记录。
+
+Ink 默认将这两份凭据写入同一个 `~/.ink/auth.json` 文件，分别存放在 `codex` 和 `apiKeys.deepseek` 字段中。下面是结构示意，值为占位文字；OAuth 部分仅展示分组标识和访问令牌，其他令牌及有效期字段省略，完整记录由登录流程写入：
+
+```json
+{
+  "version": 1,
+  "codex": {
+    "provider": "openai-codex",
+    "accessToken": "<OpenAI 的 OAuth 访问令牌>"
+  },
+  "apiKeys": {
+    "deepseek": "<DeepSeek 的 Key>"
+  }
+}
+```
+
+保存 DeepSeek Key 时，登录处理代码将 `deepseek` 作为 `family`，把用户输入的 Key 交给 [`saveApiKey`](https://github.com/FishInSalt/ink/blob/main/src/provider/auth-store.ts)：
+
+```ts
+// src/provider/auth-store.ts
+export function saveApiKey(
+  family: ApiKeyFamily,
+  key: string,
+  authPath?: string
+): void {
+  const store = readCompat(authPath);
+  store.apiKeys = { ...store.apiKeys, [family]: key };
+  writeStore(store, authPath);
+}
+```
+
+`readCompat` 从凭据文件（默认是 `~/.ink/auth.json`）读取已有记录，`saveApiKey` 合并并更新 `apiKeys` 中由 `family` 指定的那一项，再由 `writeStore` 将完整记录写回同一个文件。本例只更新 `apiKeys.deepseek`；在原文件正常可读时，未被修改的 `codex` 区域和其他分组的 Key 都会保留。
+
+OAuth 的保存和刷新同样保留已有的 `apiKeys` 区域，因此两类凭据可以共存在这个文件中。
+
+### 2.3 按接入分组找到对应凭据
+
+凭据共存在一个文件中，读取时仍按接入分组区分。对于 DeepSeek，读取函数需要知道两个名称：`family: "deepseek"` 指定文件中的保存位置，`envVar: "DEEPSEEK_API_KEY"` 指定可作为后备的环境变量。`resolveApiKey` 根据这两个参数，按顺序查找可用的 Key：
+
+```ts
+// src/provider/auth-store.ts
+export function resolveApiKey(
+  family: ApiKeyFamily,
+  envVar: string,
+  authPath?: string
+): ResolvedApiKey | null {
+  const stored = loadApiKey(family, authPath);
+  if (stored !== null) return { key: stored, source: "stored" };
+  const fromEnv = process.env[envVar];
+  if (fromEnv !== undefined && fromEnv !== "")
+    return { key: fromEnv, source: "env", envVar };
+  return null;
+}
+```
+
+`loadApiKey` 按 `family` 从文件的 `apiKeys[family]` 读取保存值，本例对应 `apiKeys.deepseek`。Ink 优先使用通过 `/login deepseek` 保存的 Key；没有已保存的 Key 时，才读取环境变量 `DEEPSEEK_API_KEY`。
+
+`openai-codex` 分组读取 `codex` 中保存的 ChatGPT 登录凭据。切换模型时，Ink 根据目标接入分组使用对应的凭据。
+
+两家的凭据保存好后，接下来通过 `/model` 选择模型。保存凭据只是为调用提供认证信息，并不代表 Ink 已验证账号能调用某个具体模型。
+
+## 3. 通过 `/model` 选择模型
+
+用户通过 `/model` 调出模型选择器，从候选列表中选择当前对话使用的模型。列表中的模型采用 `接入分组/模型 ID` 的完整引用，例如 `deepseek/deepseek-flash`。前半段让 Ink 知道使用哪组配置，后半段是交给服务端的模型 ID。
+
+登录完成后，先执行下面的命令调出模型选择器：
+
+```text
+/model
+```
+
+先在列表中选择并确认 `openai-codex/gpt-6.1-sol`，让当前对话使用 OpenAI 模型。
+
+需要换用 DeepSeek 时，再执行 `/model`，在列表中选择并确认 `deepseek/deepseek-flash`。下一轮执行就会使用该模型，两家服务的接入配置和凭据仍然保留，无需重新登录。
+
+<ModelSelectionFlow />
+
+选择器中的模型列表由 Ink 自动生成，用户通常不需要手动维护。Ink 先检查哪些接入分组已配置凭据，再分别获取这些分组的模型列表，最后将它们合并展示在同一个选择器中。例如，本例中的 OpenAI 和 DeepSeek 模型会出现在同一个列表里，供用户选择。
+
+下面以从 OpenAI 切换到 DeepSeek 的这次 `/model` 操作为例，从筛选接入分组开始，看列表怎样生成，以及用户的选择怎样传给切换入口。此时当前模型仍是 `openai-codex/gpt-6.1-sol`，用户准备选择的是 `deepseek/deepseek-flash`。
+
+### 3.1 找出已配置凭据的接入分组
+
+Ink 已支持多个接入分组。生成模型列表时，它会逐个检查这些分组是否已配置凭据，保留已配置凭据的分组，随后再查询它们的模型列表。
+
+本例假设只有 `openai-codex` 和 `deepseek` 已配置凭据，筛选过程示意如下：
+
+| 待检查的接入分组 | 凭据检查结果         | 筛选动作 |
+| ---------------- | -------------------- | -------- |
+| `openai-codex`   | 已配置，返回 `true`  | 保留     |
+| `deepseek`       | 已配置，返回 `true`  | 保留     |
+| 其余已支持分组   | 未配置，返回 `false` | 跳过     |
+
+对应的筛选逻辑在 [`buildModelList`](https://github.com/FishInSalt/ink/blob/main/src/repl/commands.ts) 中。`families` 数组列出 Ink 已支持的接入分组名称，再通过 `filter` 按凭据检查结果进行筛选：
+
+```ts
+// src/repl/commands.ts — buildModelList 的分组筛选部分节选。
+const families = [
+  "anthropic",
+  "openai",
+  "openai-codex",
+  "zai",
+  "deepseek",
+  "moonshotai",
+  "moonshotai-cn",
+] as const;
+// 省略 fallbackNotes、ids 的声明。
+// deps 保存调用者传入的辅助函数；configured 对应凭据检查函数 familyConfigured。
+const configuredFamilies = families.filter(f => deps.configured(f));
+```
+
+`filter` 依次把 `families` 中的分组名交给 `deps.configured`，保留检查结果为 `true` 的分组。因此，本例最终得到 `configuredFamilies = ["openai-codex", "deepseek"]`，下一步就依次获取这两个分组的模型列表。
+
+这里检查的是能否取得凭据，不验证凭据是否有效，也不验证账号是否具有模型调用权限。
+
+### 3.2 从各自的数据源取得模型 ID
+
+上一步筛出了 `openai-codex` 和 `deepseek`，接下来分别取得这两个分组的模型 ID。先确认数据从哪里获取，再按循环顺序追踪两次查询，看各自的结果怎样返回。
+
+#### 两个分组的模型列表分别来自哪里？
+
+`openai-codex` 分组通过网络读取 [pi 维护的模型信息表](https://pi.dev/models)，这份表按接入分组记录模型 ID、上下文窗口和图片输入支持等信息；`deepseek` 分组则查询 DeepSeek 的模型列表 API。两条查询路径的默认数据来源如下：
+
+<p className="my-2 text-sm sm:hidden">窄屏可横向滑动，查看完整查询地址。</p>
+
+<div className="model-list-sources overflow-x-auto [&_table]:min-w-[42rem] [&_th:first-child]:w-32 [&_td:first-child]:whitespace-nowrap" role="region" aria-label="候选模型的正常查询来源" tabIndex={0}>
+
+| 接入分组       | 正常查询的数据源与凭据使用                                                                                                                 |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `openai-codex` | 已保存 ChatGPT 登录凭据时，查询 pi 维护的模型信息表；查询时不携带 OAuth 令牌：<br />`GET https://pi.dev/api/models/providers/openai-codex` |
+| `deepseek`     | 携带 DeepSeek Key，查询 DeepSeek 的模型列表 API：<br />`GET https://api.deepseek.com/models`                                               |
+
+</div>
+
+#### 怎样按分组查询并取得结果？
+
+`buildModelList` 遍历 `configuredFamilies`，通过 `deps.discover(family)` 依次查询每个分组，将返回的模型 ID 数组或 `null` 保存在 `discovered` 中：
+
+```ts
+// src/repl/commands.ts — buildModelList 的已配置分组查询分支节选。
+// configuredFamilies 非空时进入此分支；初始化候选分支省略。
+for (const family of configuredFamilies) {
+  // 本例中，family 依次为 "openai-codex"、"deepseek"。
+  let discovered = await deps.discover(family);
+  // 省略后续后备候选处理与完整引用的整理。
+}
+```
+
+这里的 `deps.discover` 对应 [`discoverModels`](https://github.com/FishInSalt/ink/blob/main/src/provider/discover.ts)，它根据分组名称选择查询路径。具体请求交给辅助函数 `fetchJson`，由它发送请求、解析回复并取出模型 ID 数组。下面沿需要发起网络请求、且两次查询都成功的情况展开。
+
+**第一次循环：查询 `openai-codex`。** 此时 `family` 是 `"openai-codex"`，`deps.discover(family)` 调用 `discoverModels("openai-codex")`，命中下面的返回分支：
+
+```ts
+// src/provider/discover.ts — discoverModels 开头节选。
+export async function discoverModels(
+  family: ProviderName
+): Promise<string[] | null> {
+  if (!familyConfigured(family)) return null;
+  if (family === "openai-codex") return discoverCodexModels();
+  // 后续 DeepSeek 及其他接入分组的处理分支省略。
+}
+```
+
+`discoverModels` 调用 `discoverCodexModels`，后者通过 `fetchJson` 向 pi 请求该分组的模型信息表：
+
+```ts
+// src/provider/discover.ts — discoverCodexModels 完整实现。
+async function discoverCodexModels(): Promise<string[] | null> {
+  if (!familyConfigured("openai-codex")) return null;
+  const base = (process.env.INK_CATALOG_BASE_URL ?? "https://pi.dev").replace(
+    /\/+$/,
+    ""
+  );
+  return fetchJson(`${base}/api/models/providers/openai-codex`, {
+    accept: "application/json",
+  });
+}
+```
+
+向 pi 发出的请求头只有 `accept`，不携带 ChatGPT 的 OAuth 令牌。查询成功后，`fetchJson` 返回模型 ID 数组；`discoverCodexModels` 和 `discoverModels` 再依次返回同一个结果。外层 `await deps.discover(family)` 完成时，这个数组就保存在本轮的 `discovered` 中。
+
+**第二次循环：查询 `deepseek`。** 此时 `family` 是 `"deepseek"`，`discoverModels("deepseek")` 跳过 `openai-codex` 的返回分支，进入 DeepSeek 分支。它向默认基地址 `https://api.deepseek.com` 后的 `/models` 发送请求，请求所需的 Key 由 `deepseekApiKey()` 取得：
+
+```ts
+// src/provider/discover.ts — discoverModels 的 DeepSeek 分支节选。
+if (family === "deepseek") {
+  const cacheKey = "deepseek"; // 查询结果的短期缓存标识。
+  // 省略命中短期缓存时提前返回的检查。
+  const redirected = process.env.DEEPSEEK_BASE_URL !== undefined; // 是否覆盖默认地址。
+  const base = (
+    process.env.DEEPSEEK_BASE_URL ?? DEEPSEEK_DEFAULT_BASE_URL
+  ).replace(/\/+$/, "");
+  const ids = await fetchJson(
+    `${base}/models`,
+    {
+      accept: "application/json",
+      authorization: `Bearer ${String(deepseekApiKey())}`,
+    },
+    cacheKey
+  ).catch(() => null);
+  return redirected ? ids : (ids ?? ([...DEEPSEEK_SEED_MODELS] as string[]));
+}
+```
+
+查询成功时，`fetchJson` 返回的模型 ID 数组保存在 `ids` 中，末尾的 `return` 返回这个数组。于是 `discoverModels("deepseek")` 完成，外层 `await deps.discover(family)` 取得结果，保存在第二次循环的 `discovered` 中。返回表达式中的 `DEEPSEEK_SEED_MODELS` 是源码预置的后备 ID，仅在默认地址查询未取得列表时使用。
+
+两次查询分别返回各自分组的模型 ID 数组。下面每组选取两个已有的模型 ID，展示两轮 `discovered` 中保存的结果形式；这是教学示意，并非实际查询记录或完整模型清单：
+
+<div className="overflow-x-auto" role="region" aria-label="两次模型列表查询的结果示意" tabIndex={0}>
+
+| 本次查询的 `family` | 返回的 `discovered`（示意）             |
+| ------------------- | --------------------------------------- |
+| `"openai-codex"`    | `["gpt-6.1-sol", "gpt-6-luna"]`         |
+| `"deepseek"`        | `["deepseek-flash", "deepseek-v4-pro"]` |
+
+</div>
+
+### 3.3 展示模型列表，接收用户选择
+
+取得两个接入分组的模型 ID 后，Ink 会将它们整理成同一个模型选择列表，标记当前使用的模型，供用户选择。用户确认某个模型后，命令处理代码再取得对应的完整模型引用，交给切换入口。下面先看这个列表怎样生成。
+
+#### 整理模型列表
+
+返回的 ID 还没有分组前缀。`buildModelList` 会补成完整模型引用，放入 `ids` 数组：
+
+- `gpt-6.1-sol` → `openai-codex/gpt-6.1-sol`
+- `gpt-6-luna` → `openai-codex/gpt-6-luna`
+- `deepseek-flash` → `deepseek/deepseek-flash`
+- `deepseek-v4-pro` → `deepseek/deepseek-v4-pro`
+
+这样，两个分组的模型可以放进同一个列表，每个引用仍能标明模型属于哪个接入分组。
+
+接下来还要标记并保留当前模型。Runner 负责管理当前对话的运行状态，`/model` 的处理代码从它读取当前模型引用，通过参数 `current` 传入；本例是 `openai-codex/gpt-6.1-sol`。即使查询结果没有包含它，选择器也会保留它，便于继续使用当前模型。
+
+所有分组处理完后，函数对 `ids` 去重，补上可能缺失的 `current`，再构造选择器需要的 `rows`：
+
+```ts
+// src/repl/commands.ts — buildModelList 末尾节选。
+ids = [...new Set(ids)];
+const rows = (ids.includes(current) ? ids : [current, ...ids]).map(id => ({
+  label: id,
+  description: id === current ? "current" : familyLabel(id),
+}));
+return { rows, fallbackNotes };
+```
+
+当前模型已经在 `ids` 中时保留原位置；不在时补到开头。`rows` 中的每个对象对应选择器中的一个候选行：`label` 保存完整模型引用，`description` 则标记当前选择或说明所属分组。
+
+沿用前面两个分组各两个模型的示例，整理后的 `rows` 包含以下四行。这是处理结果示意，实际列表可能包含更多模型：
+
+```ts
+[
+  {
+    label: "openai-codex/gpt-6.1-sol",
+    description: "current",
+  },
+  {
+    label: "openai-codex/gpt-6-luna",
+    description: "ChatGPT plan (Codex)",
+  },
+  { label: "deepseek/deepseek-flash", description: "DeepSeek" },
+  { label: "deepseek/deepseek-v4-pro", description: "DeepSeek" },
+];
+```
+
+#### 展示列表，等待用户选择
+
+`buildModelList` 返回 `rows` 后，命令处理代码调用 `select`，将 `rows` 作为 `items` 传入。选择器把这四个候选模型展示给用户，并等待用户确认或取消：
+
+```ts
+// src/repl/commands.ts — /model 的 TUI 选择器显示部分节选。
+// 省略此前的候选列表构建和提示。
+const index = await select({
+  title: "models — switch applies from the next turn",
+  items: rows,
+});
+```
+
+#### 取得用户选择，交给切换入口
+
+用户确认 `deepseek/deepseek-flash` 所在行时，`select` 返回该行的行号，保存在 `index` 中。处理代码再从 `rows` 中找到这一行，读取其 `label`，取得完整模型引用：
+
+```ts
+// src/repl/commands.ts — /model 的选择结果处理部分节选。
+// 紧接上面的 select 调用；省略后续命令返回。
+const id = index === null ? undefined : rows[index]?.label;
+if (id !== undefined) switchModel(ctx, id);
+```
+
+取消选择时，`index` 为 `null`，不会调用 `switchModel`。确认选择后，`switchModel` 接收完整模型引用，并调用 Runner 的 `setModel`：
+
+```ts
+// src/repl/commands.ts — switchModel 节选。
+function switchModel(ctx: CommandContext, id: string): void {
+  ctx.runner.setModel(id);
+  // 省略后续状态显示和提示。
+}
+```
+
+本例中的 `id` 是 `deepseek/deepseek-flash`。`switchModel` 将这个完整模型引用原样传给 Runner 的 `setModel`。下一节继续看 `setModel` 怎样解析引用、准备接入对象，并保存和应用这次选择。
+
+## 4. 选定模型后，Ink 怎样完成切换？
+
+选择器将 `deepseek/deepseek-flash` 交给 Runner 的 `setModel`；直接执行 `/model deepseek/deepseek-flash` 也进入同一路径。此时 Ink 已经知道用户要选哪个模型，还需要取得对应的 API 实现、服务地址和凭据，再保存并应用这次选择。
+
+`setModel` 的顺序是先准备接入对象，再保存会话中的模型选择，最后更新当前配置：
+
+```ts
+// src/runner.ts — RunnerImpl.setModel 节选。
+setModel(reference: string): void {
+  const prepared = this.prepareModel(reference);
+  // 省略记录用户显式选择的标记。
+  this.sessionStore?.setModel(prepared.ref);
+  this.applyModel(prepared);
+  // 省略后续凭据提示。
+}
+```
+
+### 4.1 解析引用，确定复用还是创建接入对象
+
+`setModel` 先调用 `prepareModel`。它接收完整模型引用字符串，调用 `parseModelRef` 得到解析结果 `ref`，再比较目标分组与当前分组：相同就复用已有接入对象，不同才创建新对象。
+
+```ts
+// src/runner.ts — RunnerImpl.prepareModel
+private prepareModel(reference: string) {
+  const ref = parseModelRef(reference);
+  if (!ref.modelId.trim()) throw new Error("model must not be blank");
+  const provider =
+    ref.provider === this.providerName
+      ? this.provider
+      : withLogging(createProviderFor(ref.provider), this.logger);
+  return { ref, provider, reference: `${ref.provider}/${ref.modelId}` };
+}
+```
+
+这里的 `ref.provider` 是接入分组名，例如 `deepseek`；局部变量 `provider` 和 `this.provider` 则是模型接入对象，`this.providerName` 保存当前分组名。`withLogging` 为新对象接上日志记录。方法最后把解析结果、接入对象和完整引用一起返回，供后续保存和应用。
+
+先看其中调用的 [`parseModelRef`](https://github.com/FishInSalt/ink/blob/main/src/provider/resolve.ts)。下面是函数节选，只展示本例“带斜杠、模型 ID 非空、分组已登记”的路径，其他分支已标注省略：
+
+```ts
+// src/provider/resolve.ts — parseModelRef 节选，非完整函数实现。
+export function parseModelRef(reference: string): ModelRef {
+  const trimmed = reference.trim();
+  const slash = trimmed.indexOf("/");
+  // 省略不含斜杠时的分支。
+  const modelId = trimmed.slice(slash + 1);
+  // 省略模型 ID 为空时的分支。
+  const provider = knownProvider(trimmed.slice(0, slash));
+  if (provider !== undefined) return { provider, modelId };
+  // 省略未知前缀的后备处理。
+}
+```
+
+`knownProvider` 检查斜杠前的名称是否为 Ink 已登记的接入分组。`deepseek` 可以被识别，斜杠后的 `deepseek-flash` 作为模型 ID 保留。本例返回值示意如下：
+
+```json
+{
+  "provider": "deepseek",
+  "modelId": "deepseek-flash"
+}
+```
+
+回到 `prepareModel`，本例从 `openai-codex` 切到 `deepseek`，两个分组不同，因此执行 `createProviderFor(ref.provider)`。传入的参数是分组名 `deepseek`，返回值是模型接入对象；模型 ID 则保留给后续请求使用。
+
+下面继续进入 `createProviderFor`，看 `deepseek` 这个分组名怎样对应到具体的 API、地址和凭据。准备对象期间，Runner 中的当前模型配置尚未被替换。
+
+### 4.2 按接入分组取得 API、地址和凭据
+
+本例从 OpenAI 的 ChatGPT 入口切到 DeepSeek，需要更换 API 实现、服务地址和凭据来源。每个接入分组都在源码中登记了这些对应关系：模型调用 API 规定请求与回复的格式，服务基地址决定请求发往哪里，凭据则用于验证调用者身份。各分组有内置默认地址，也允许通过对应的环境变量覆盖。下面对照本例的两条接入路径：
+
+<p className="my-2 text-sm sm:hidden">窄屏可横向滑动，查看两家的配置。</p>
+
+<div className="provider-config-overview overflow-x-auto [&_table]:min-w-[42rem] [&_table]:table-fixed [&_th:first-child]:w-32 [&_td:first-child]:whitespace-nowrap" role="region" aria-label="OpenAI 与 DeepSeek 的接入配置" tabIndex={0}>
+
+| 配置项                     | OpenAI（ChatGPT 入口）            | DeepSeek（API 入口）                |
+| -------------------------- | --------------------------------- | ----------------------------------- |
+| 接入分组                   | `openai-codex`                    | `deepseek`                          |
+| 完整模型引用               | `openai-codex/gpt-6.1-sol`        | `deepseek/deepseek-flash`           |
+| 请求协议                   | Responses                         | Chat Completions                    |
+| 默认基地址                 | `https://chatgpt.com/backend-api` | `https://api.deepseek.com`          |
+| 覆盖基地址的<br />环境变量 | `OPENAI_CODEX_BASE_URL`           | `DEEPSEEK_BASE_URL`                 |
+| 认证方式                   | ChatGPT OAuth                     | API Key                             |
+| 凭据保存位置               | `auth.json` 中的 `codex`          | `auth.json` 中的 `apiKeys.deepseek` |
+
+</div>
+
+同一家大模型提供商也可能有不同接入方式。Ink 为 OpenAI 设置了两个分组：
+
+- **`openai`**：用户提供 API Key，Ink 用它验证身份，并通过 Chat Completions 接口调用模型。
+- **`openai-codex`**：用户通过 ChatGPT 账号登录，Ink 取得登录凭据（OAuth），再通过 Responses 接口调用模型。
+
+> 本例的 `gpt-6.1-sol` [工具调用要求使用 Responses](https://developers.openai.com/api/docs/models/gpt-6.1-sol)。Ink 当前的 Responses 接入使用 ChatGPT OAuth，因此示例采用 `openai-codex` 分组。
+
+[`createProviderFor`](https://github.com/FishInSalt/ink/blob/main/src/provider/resolve.ts)根据分组选择对应的创建函数。参数类型 `ProviderName` 限定为 Ink 已登记的分组名，返回类型 `LLMProvider` 是统一的模型接入接口。下面只节选本例涉及的两个分支：
+
+```ts
+// src/provider/resolve.ts — createProviderFor 节选。
+// 其他接入分组与不可达分支省略。
+export function createProviderFor(provider: ProviderName): LLMProvider {
+  switch (provider) {
+    case "openai-codex":
+      return createCodexResponsesProvider();
+    case "deepseek":
+      return createDeepSeekProvider();
+  }
+}
+```
+
+返回的模型接入对象实现第 02 篇介绍的统一接入接口，执行循环随后通过它发出请求。具体协议由创建函数选定，修改基地址不会自动更换协议。调用创建函数只是准备对象，并不发送模型请求。
+
+DeepSeek 使用兼容 Chat Completions 的接口，因此可以复用同一套协议适配代码。适配器负责按该 API 的格式组织请求、读取回复；`createDeepSeekProvider` 调用共用的 `createOpenAICompletionsProvider`，为它传入 DeepSeek 自己的地址和认证配置：
+
+```ts
+// src/provider/deepseek.ts
+// 省略模型候选常量与其他函数。
+export const DEEPSEEK_DEFAULT_BASE_URL = "https://api.deepseek.com";
+
+export function createDeepSeekProvider(): LLMProvider {
+  return createOpenAICompletionsProvider({
+    baseUrl: process.env.DEEPSEEK_BASE_URL ?? DEEPSEEK_DEFAULT_BASE_URL,
+    auth: { family: "deepseek", envVar: "DEEPSEEK_API_KEY" },
+    name: "deepseek",
+  });
+}
+```
+
+- `baseUrl` 选择请求基地址。
+- `auth` 指定读取 `deepseek` 分组保存的 Key，并以 `DEEPSEEK_API_KEY` 为后备。
+- `name: "deepseek"` 标明接入分组，供适配器查询模型能力、处理思考参数等差异；模型能力的处理在第 5 节展开。
+
+DeepSeek 的创建函数将 `auth` 配置交给共用适配器。适配器在创建模型接入对象时调用第 2.3 节的 `resolveApiKey`，确定使用哪份 Key，后续请求沿用这个值。
+
+`openai-codex` 的模型接入对象由 [`createCodexResponsesProvider`](https://github.com/FishInSalt/ink/blob/main/src/provider/codex-responses.ts)创建。它在每次请求前读取 OAuth 登录凭据；访问令牌有有效期，必要时会先刷新再使用。
+
+本例完成准备后，已经得到 DeepSeek 的模型接入对象，但尚未发送模型请求，也没有验证服务端是否接受 `deepseek-flash`。接下来才保存并应用这次选择。
+
+### 4.3 保存选择，更新当前模型配置
+
+接入对象准备好后，处理流程回到 Runner 的 `setModel`。前面 `prepareModel(reference)` 返回的模型解析结果、模型接入对象和完整模型引用，保存在局部变量 `prepared` 中。接下来的保存和更新操作都会使用这份结果，先看它在本例中包含哪些内容：
+
+<div className="overflow-x-auto" role="region" aria-label="模型切换准备结果的内容与用途" tabIndex={0}>
+
+| 字段                 | 本例中的内容                                          | 用途                              |
+| -------------------- | ----------------------------------------------------- | --------------------------------- |
+| `prepared.ref`       | `{ provider: "deepseek", modelId: "deepseek-flash" }` | 保存模型选择，更新分组名和模型 ID |
+| `prepared.provider`  | 前面准备好的 DeepSeek 模型接入对象                    | 更新 Runner 使用的接入对象        |
+| `prepared.reference` | `"deepseek/deepseek-flash"`                           | 计算该模型对应的压缩设置          |
+
+</div>
+
+其中，`prepared.ref.provider` 保存分组名称 `deepseek`，`prepared.provider` 保存模型接入对象。
+
+启用会话保存时，Runner 先将这次模型选择写入本地会话文件，供以后恢复会话时使用。这一步使用的是 `prepared.ref` 中的接入分组和模型 ID。
+
+Runner 通过 `this.sessionStore?.setModel(prepared.ref)` 完成记录。这里的 `setModel` 属于 [`SessionStore`](https://github.com/FishInSalt/ink/blob/main/src/core/session/store.ts)：
+
+```ts
+// src/core/session/store.ts — SessionStore.setModel 节选。
+setModel(model: SessionModel): void {
+  const next = parseModel(model, "setModel");
+  const current = this.getModel();
+  if (current?.provider === next.provider && current.modelId === next.modelId)
+    return;
+  this.writeRecords(
+    `${JSON.stringify({ type: "session_model", ...next, explicit: true })}\n`
+  );
+  // 省略写入成功后的内存记录更新。
+}
+```
+
+这里先比较目标模型与会话已有的选择，相同时不重复写入。选择发生变化时，`writeRecords` 将分组 `provider` 和模型 ID `modelId` 写入一条 `session_model` 记录；本例对应 `deepseek` 和 `deepseek-flash`。`explicit: true` 标明这是用户主动选择的模型。
+
+如果新选模型的接入分组和模型 ID 写入当前会话记录失败，后续 `applyModel` 就不会执行，Runner 中的当前模型配置也不会被替换。
+
+接下来，Runner 的 `setModel` 调用 `applyModel`，读取 `prepared` 中准备好的模型信息，更新 Runner 的模型 ID、接入分组和模型接入对象：
+
+```ts
+// src/runner.ts — RunnerImpl.applyModel 内部节选。
+// 省略其他对象状态处理及压缩、思考设置的更新。
+this.model = prepared.ref.modelId;
+this.providerName = prepared.ref.provider;
+this.provider = prepared.provider;
+```
+
+本例中，`this.model` 更新为 `deepseek-flash`，`this.providerName` 更新为 `deepseek`，`this.provider` 换成前面准备好的 DeepSeek 接入对象。`applyModel` 还会根据新模型的能力重新计算压缩设置、调整思考级别。
+
+处理完成后，命令显示类似 `Model: deepseek/deepseek-flash` 的提示。切换保留已有对话历史，不会改写启动默认设置，也不会删除 OpenAI 的凭据。
+
+### 4.4 正在执行的任务会立即换模型吗？
+
+模型配置更新后，还需要明确新模型从什么时候开始使用。如果用户在 Ink 仍使用 OpenAI 模型处理输入时切换到 DeepSeek，这次切换会影响正在进行的执行，还是从下一次执行开始生效？
+
+在交互模式中，用户提交一次输入后，Ink 会启动一次主执行过程。模型可能先要求调用工具，再根据工具结果继续回复；这整个过程由主 Runner 的一次 `runTurn` 调用完成。
+
+`runTurn` 在开始时将模型、模型接入对象、压缩设置和完整引用保存到局部变量中，后续执行沿用这些值：
+
+```ts
+// src/runner.ts — RunnerImpl.runTurn 开头。
+// 后续事件与异常处理省略。
+const model = this.model;
+const provider = this.provider;
+const settings = this.settings;
+const modelReference = qualifiedReference(this.providerName, model);
+```
+
+如果切换发生在 Ink 等待工具结果时，工具结果返回后，Ink 仍会使用 OpenAI 模型继续本次执行；下一次 `runTurn` 才读取更新后的配置，使用 DeepSeek。切换不会在本次执行中将旧模型 ID 与新的模型接入对象配在一起。
+
+本次执行期间触发的自动压缩，也沿用本次开始时确定的模型、模型接入对象和压缩设置。
+
+因此，选择 DeepSeek 后的下一次主执行会使用 DeepSeek。接下来再看：切换模型后，Ink 怎样根据新模型的能力处理图片输入、调整思考设置，以及决定何时压缩对话历史。
+
+## 5. 切换模型后，Ink 怎样处理能力差异？
+
+新选中的模型对图片输入的支持、可用的思考级别和上下文容量，可能与原模型不同。Ink 需要根据这些差异调整后续处理。本节先看图片输入、思考设置和历史压缩会受到哪些影响，再看 Ink 从哪里取得模型能力信息，以及怎样读取这些信息、更新本地缓存。
+
+### 5.1 哪些处理会随新模型的能力变化？
+
+**已有图片，新模型却不支持图片输入。** 接入层在发送请求前检查模型能力。如果 Ink 将新模型判定为不支持图片，就会把请求中的图片块替换为文字占位提示，模型无法通过这些提示继续读取图片内容。这个转换不删除已经保存的图片历史；用户消息和工具结果中的图片都会按此处理。对应实现见 [`downgradeUnsupportedImages`](https://github.com/FishInSalt/ink/blob/main/src/provider/shared.ts)，图片进入消息的过程见[第 13 篇](/posts/coding-agent-13-images/)。
+
+**原先选择的思考级别，新模型不支持。** 用户可以通过 `/think high` 等命令设置思考级别，请求模型投入相应的推理力度，但各模型支持的级别并不相同。切换时，`applyModel` 根据新模型的可用级别调整当前值：原值可用就保留，否则改为一个可用级别；如果模型不提供思考控制，就不再按原级别发送控制参数。判断与调整由 [`thinkingMetaFor` 和 `clampThinkingLevel`](https://github.com/FishInSalt/ink/blob/main/src/provider/thinking.ts)完成，接入实现随后把有效级别转换为对应 API 的参数。
+
+**长对话切到上下文容量更小的模型。** `applyModel` 会按新模型的容量重新计算自动压缩阈值，但不会立即压缩已有历史。后续执行在调用模型前检查是否需要压缩。生成摘要本身也需要把待压缩内容交给模型，如果摘要请求仍超过新模型的输入容量，Ink 会提示先切到更大窗口的模型执行 `/compact`，或通过 `/new` 开始新对话。阈值计算见 [`compactionSettingsFor`](https://github.com/FishInSalt/ink/blob/main/src/provider/compaction-settings.ts)，压缩过程见[第 04 篇](/posts/coding-agent-04-context/)。
+
+这些调整使用新模型的能力信息。它们影响后续请求的构造和压缩判断；已经开始的主执行，仍遵循第 4.4 节介绍的生效时序。
+
+### 5.2 Ink 怎样读取新模型的能力信息？
+
+为了处理图片输入、调整思考设置和计算历史压缩阈值，Ink 需要读取新模型的能力信息，包括是否支持图片、可用的思考级别和上下文容量。Ink 根据接入分组和模型 ID，在前面介绍的 pi 模型信息表中查找对应记录。
+
+以 `deepseek/deepseek-flash` 为例，接入分组是 `deepseek`，模型 ID 是 `deepseek-flash`，查找时调用 [`catalogEntryFor("deepseek", "deepseek-flash")`](https://github.com/FishInSalt/ink/blob/main/src/provider/catalog.ts)。这个函数从内存中查找对应的模型能力记录，找到时返回该记录，找不到时返回 `null`。
+
+取得记录后，各模块读取自己需要的字段，分别对应前面的三项处理：
+
+<p className="my-2 text-sm sm:hidden">窄屏可横向滑动，查看完整字段说明。</p>
+
+<div className="overflow-x-auto [&_table]:min-w-[28rem] [&_th:first-child]:w-40" role="region" aria-label="模型能力信息与三项处理的对应关系" tabIndex={0}>
+
+| 要判断的能力       | 能力记录中的依据                                                                                                         |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------ |
+| 能否接收图片       | `input` 记录支持的输入类型；包含 `image` 时，Ink 将该模型按支持图片输入处理。                                            |
+| 可用的思考级别     | `reasoning` 记录是否支持思考控制，`thinkingLevelMap` 记录思考级别映射，供 Ink 结合接入分组的规则确定可用级别和请求参数。 |
+| 用于压缩判断的容量 | `contextWindow` 记录上下文窗口的 Token 容量，供 Ink 计算历史压缩的触发阈值。                                             |
+
+</div>
+
+记录或字段缺失时，各模块会按各自的后备规则查找其他能力信息，或采用默认值；图片支持和思考控制仍无法确定时，就按不支持处理。这些信息用于指导请求构造和压缩判断，实际服务是否接受相应输入与参数，仍需以服务端为准。
+
+### 5.3 模型能力信息怎样缓存和更新？
+
+`catalogEntryFor` 只读取内存记录，因此 Ink 需要先加载这些信息，并在需要时更新。本地缓存让上次取得的信息能在下次启动时继续使用。
+
+**启动时加载。** Ink 通过 [`loadCatalogCache`](https://github.com/FishInSalt/ink/blob/main/src/provider/catalog.ts)将已有缓存中的模型信息加载到内存，供前面的能力查询使用。缓存文件默认是 `~/.ink/models-catalog.json`。
+
+**按需检查更新。** 用户启动 Ink 开始对话或执行任务时，Ink 会在加载已有缓存后异步调用 [`refreshCatalog`](https://github.com/FishInSalt/ink/blob/main/src/provider/catalog.ts)，检查模型能力信息是否需要更新。启动流程无需等待远程更新完成，能力查询可以先使用已有记录或后备规则。在交互界面中执行不带参数的 `/model` 调出模型选择器时，也会触发这项检查。
+
+需要更新并成功从 pi 取得新数据后，Ink 先更新内存记录，再尝试保存到缓存文件。后续的能力查询就能读取新记录。
+
+**临时失败时保留已有记录。** 遇到网络异常、超时或临时服务错误时，Ink 会保留内存中已有的模型能力记录，供后续查询继续使用。查不到可用记录时，图片支持和思考控制还会根据接入分组和模型名称匹配 Ink 内置的规则，仍无法确定就按不支持处理；上下文容量则优先采用用户配置，再参考其他已知模型信息，均不可用时采用默认值。已有记录中的能力信息可能过时。
+
+到这里，一次“登录、选模型、使用新模型”的过程已经完整。退出并重新启动 Ink 后是否沿用这次选择，还需要区分新建会话与恢复已有会话。
+
+## 6. 重新启动 Ink：新建与恢复会话怎样选择模型？
+
+退出并重新启动 Ink 后，是否继续使用此前通过 `/model` 选中的模型，需要区分两种情况：**创建新会话**，还是**恢复已有会话**。
+
+本节先介绍如何设置新建会话的默认模型，以及启动参数、环境变量和默认设置之间的优先级；再说明恢复已有会话时，怎样读取保存的模型选择，以及何时由启动参数覆盖。以下假设已启用会话保存，且所用模型的凭据可用。
+
+先看一个例子：已信任项目的默认模型是 `openai-codex/gpt-6.1-sol`，本次会话已有保存的对话历史，后来通过 `/model` 切到了 `deepseek/deepseek-flash`，也保存了这次选择。退出后，在原工作目录中选择不同的启动方式，会得到不同结果：
+
+- **执行 `ink` 创建新会话**：未额外指定启动模型时，采用项目默认的 OpenAI 模型。
+- **执行 `ink --continue` 恢复原会话**：沿用会话保存的 DeepSeek 模型。
+
+运行中执行 `/new` 则是在当前 Ink 中开始新对话，仍沿用当前模型。它与退出后重新启动 Ink 创建新会话是两种操作。
+
+这些模型选择分别保存在当前运行配置、本地会话文件和默认设置中，使用时机如下：
+
+<p className="my-2 text-sm sm:hidden">窄屏可横向滑动，查看完整保存范围。</p>
+
+<div className="overflow-x-auto [&_table]:min-w-[28rem]" role="region" aria-label="模型选择的保存位置和使用时机" tabIndex={0}>
+
+| 位置           | 保存的内容                | 使用时机                  |
+| -------------- | ------------------------- | ------------------------- |
+| Runner 内存    | 当前模型与模型接入对象    | 下一次主执行开始时读取    |
+| 本地会话文件   | 该会话的接入分组与模型 ID | 恢复该会话时读取          |
+| 全局或项目设置 | `defaultModel`            | 启动 Ink 创建新会话时读取 |
+
+</div>
+
+### 6.1 新建会话的默认模型与启动优先级
+
+如果希望以后重新启动 Ink 创建新会话时默认使用 DeepSeek，可以通过 `/settings` 命令保存 `defaultModel`，即启动默认模型：
+
+```text
+/settings defaultModel deepseek/deepseek-flash
+```
+
+这条命令默认写入全局设置，供以后重新启动 Ink 创建新会话时使用，不会立即切换当前模型。
+
+对于已信任的当前项目，如果希望它默认使用 OpenAI，可以单独保存项目默认模型。命令末尾的 `project` 表示写入项目设置：
+
+```text
+/settings defaultModel openai-codex/gpt-6.1-sol project
+```
+
+项目默认值能否读取，取决于启动时已有的信任记录；如果以 `--no-trust` 启动，则会跳过项目默认值。信任机制见[第 08 篇](/posts/coding-agent-08-trust/)。
+
+这样，全局默认仍是 DeepSeek，这个项目保存的默认值则是 OpenAI。若本次在该项目中启动 Ink 时想临时使用 DeepSeek，可以通过 `-m`（或 `--model`）指定：
+
+```bash
+ink -m deepseek/deepseek-flash
+```
+
+这次启动会采用 DeepSeek，但不会改写项目中保存的 OpenAI 默认值。
+
+启动 Ink 创建新会话时，模型可能由 `-m` 参数指定，也可能来自环境变量 `INK_MODEL` 或前面保存的默认设置。多个来源同时指定模型时，Ink 按以下[优先级](https://github.com/FishInSalt/ink/blob/main/src/cli.ts)选择：
+
+```text
+-m / --model（启动参数）
+  ↓ 未指定
+INK_MODEL（环境变量）
+  ↓ 未设置
+已信任项目的 defaultModel
+  ↓ 未设置或项目配置未获准读取
+全局 defaultModel
+  ↓ 未设置
+内置默认模型
+```
+
+选定启动模型后，Ink 会解析完整引用，准备对应的模型接入对象；处理过程见第 4 节。
+
+### 6.2 恢复已有会话：读取保存的模型选择
+
+恢复已有会话时，Ink 会读取本地会话文件中保存的接入分组和模型 ID。此前通过 `/model` 做出的选择，已经写入这份记录。
+
+退出后，可以在原工作目录执行 `ink --continue`，恢复该目录最近一个有对话历史的已保存会话。指定某个旧会话时，也在原工作目录先用 `ink sessions` 查看 ID，再执行 `ink --resume <id>`。
+
+恢复时的模型选择由 [`restoreModelFromSession`](https://github.com/FishInSalt/ink/blob/main/src/runner.ts)处理，规则与新建会话有所不同：
+
+- **启动时显式传入 `-m`**：采用参数指定的模型，并将它保存为该会话的新选择。
+- **未传入 `-m`，且会话保存了模型选择**：沿用会话记录中的模型，`INK_MODEL` 和全局、项目的 `defaultModel` 都不会覆盖它。
+- **旧会话没有模型记录**：才使用第 6.1 节介绍的启动来源确定模型。
+
+例如，执行 `ink --continue -m openai-codex/gpt-6.1-sol`，会恢复原会话并将模型选择改为 OpenAI。这里更新的是该会话的记录，全局和项目的 `defaultModel` 保持原值。
+
+如果使用 `--no-session` 启动 Ink，本次不会保存会话，也不会恢复旧会话。关于会话文件的写入和历史恢复，见[第 05 篇](/posts/coding-agent-05-sessions/)。
+
+## 7. 扩展：通过公司模型网关接入
+
+假设你要在公司项目中使用 Ink。公司要求模型请求统一经过内部模型网关：Ink 先把请求发送给网关，再由网关转发给 OpenAI、DeepSeek 等服务，便于公司统一管理用量和访问权限。管理员向你提供了三项配置：**网关地址、网关 API Key，以及允许使用的模型 ID**。
+
+要使用公司提供的模型，Ink 就需要把请求发往这个地址，使用网关的 Key，并填写网关支持的模型 ID。但 Ink 中没有这个公司网关对应的接入分组。是否必须修改源码、增加一个分组，才能接入？
+
+如果网关提供 Chat Completions 兼容接口，就可以复用 `openai` 分组的接入实现，通过配置指定网关地址和凭据，无需重新编写请求与回复的处理代码。
+
+下面使用环境变量提供网关 Key。如果此前通过 `/login openai` 保存过 Key，Ink 会优先使用保存值。使用下面的配置前，可以先在 Ink 中通过 `/logout` 选择 OpenAI，移除已保存的 Key；也可以通过 `/login openai` 将保存值更新为网关 Key，让 Ink 使用这个保存值。读取优先级见第 2.3 节。
+
+在终端中依次设置网关地址和 API Key，再启动 Ink：
+
+```bash
+export OPENAI_BASE_URL="https://gateway.example/v1"
+export OPENAI_API_KEY="<这个网关的 Key>"
+ink -m openai/example-model
+```
+
+这里的地址、Key 和 `example-model` 都是占位值，需要替换为管理员提供的实际配置。三项配置与请求的对应关系如下：
+
+<p className="my-2 text-sm sm:hidden">窄屏可横向滑动，查看完整配置对应关系。</p>
+
+<div className="overflow-x-auto [&_table]:min-w-[28rem]" role="region" aria-label="网关配置与实际请求的对应关系" tabIndex={0}>
+
+| 管理员提供的配置        | Ink 中的写法                                  | 实际作用                                                   |
+| ----------------------- | --------------------------------------------- | ---------------------------------------------------------- |
+| 网关基地址              | `OPENAI_BASE_URL`                             | Ink 在其后追加 `/chat/completions`，组成调用地址           |
+| 网关 API Key            | `OPENAI_API_KEY`，或通过 `/login openai` 保存 | 作为发往网关的请求认证凭据，保存值优先                     |
+| 模型 ID `example-model` | `-m openai/example-model`                     | 指定启动模型，将 `example-model` 作为请求中的 `model` 字段 |
+
+</div>
+
+`OPENAI_BASE_URL` 填写的是基地址，本例为 `https://gateway.example/v1`，无需包含 `/chat/completions`；Ink 拼接后的实际调用地址是 `https://gateway.example/v1/chat/completions`。`openai/example-model` 中的 `openai` 前缀用于让 Ink 选择 Chat Completions 接入实现，发送给网关的模型 ID 则是 `example-model`。
+
+启动后，如果管理员还提供了另一个模型 ID `model-b`，可以在 Ink 中执行 `/model openai/model-b` 切换，`model-b` 同样需要替换为实际值。两个模型共用 `openai` 分组的网关地址与凭据，切换模型 ID 不会切换网关。若要将多个网关作为独立分组分别配置和切换，当前仍需修改源码，登记新的接入分组。
+
+执行不带参数的 `/model` 调出选择器时，Ink 会尝试从网关的 `/models` 接口取得候选模型。如果查询失败，Ink 不会补入 OpenAI 官方服务的模型候选。只要知道管理员提供的模型 ID，仍可通过 `/model openai/<模型 ID>` 直接指定。网关实际提供哪些模型，应以管理员说明或网关返回的列表为准。
+
+修改网关地址也不会让 Ink 自动从网关取得模型能力信息。第 5 节中的能力查找仍按“接入分组＋模型 ID”进行，不按服务地址区分。如果网关沿用已有记录中的模型 ID，却改变了上下文容量或参数支持，Ink 查到的信息就可能与网关实际能力不一致，需要对照网关说明核对。
+
+在这个场景中，Ink 从已保存的凭据或环境变量中取得 Key，根据完整模型引用确定接入实现和模型 ID，再向配置的网关地址发送请求。
+
+## 8. 总结
+
+用户通过 `/login` 分别保存各家大模型提供商的凭据后，就可以通过 `/model`，在同一段对话中按任务需要选择和切换模型。各家的配置会同时保留，无需在切换时反复修改地址和 Key。
+
+这种使用体验背后，是每次模型选择都能找到对应的服务入口、凭据和调用方式。Ink 用接入分组和完整模型引用关联这些信息，在切换时更新调用配置，并根据目标模型的能力调整后续处理。

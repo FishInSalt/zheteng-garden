@@ -1,0 +1,142 @@
+---
+import "./series-visual.css";
+---
+
+<figure
+  class="model-flow series-visual not-prose"
+  aria-labelledby="model-flow-title"
+>
+  <figcaption id="model-flow-title">从 OpenAI 切换到 DeepSeek</figcaption>
+
+  <ol class="switch-flow" aria-label="当前对话的模型切换过程">
+    <li class="stage">
+      <span class="stage-label">当前对话</span>
+      <strong>使用 OpenAI</strong>
+      <span class="flow-arrow" aria-hidden="true">
+        <span class="horizontal">→</span>
+        <span class="vertical">↓</span>
+      </span>
+    </li>
+    <li class="stage action">
+      <span class="stage-label">执行命令</span>
+      <strong><code>/model</code></strong>
+      <span class="stage-detail">选择 DeepSeek 模型</span>
+      <span class="flow-arrow" aria-hidden="true">
+        <span class="horizontal">→</span>
+        <span class="vertical">↓</span>
+      </span>
+    </li>
+    <li class="stage result">
+      <span class="stage-label">下一次执行</span>
+      <strong>使用 DeepSeek</strong>
+    </li>
+  </ol>
+
+  <p class="caption">两家的连接配置和凭据都保留，切换时无需重新登录。</p>
+</figure>
+
+<style>
+  .model-flow {
+    margin: 2rem 0;
+    padding: 1.25rem;
+    border: 1px solid var(--series-rule);
+    border-radius: 0.8rem;
+    background: var(--series-paper);
+    color: var(--series-ink);
+    container-type: inline-size;
+  }
+  figcaption {
+    margin-bottom: 1rem;
+    font-weight: 700;
+    line-height: 1.6;
+  }
+  .switch-flow {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 2rem;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+  .stage {
+    position: relative;
+    display: flex;
+    min-width: 0;
+    min-height: 7rem;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.35rem;
+    padding: 0.9rem 0.7rem;
+    border: 1px solid var(--series-rule);
+    border-radius: 0.5rem;
+    text-align: center;
+    line-height: 1.6;
+  }
+  .stage-label {
+    color: var(--series-secondary);
+    font-size: 0.8rem;
+  }
+  strong {
+    font-size: 1.05rem;
+    font-weight: 700;
+  }
+  code {
+    font-size: 1.05rem;
+  }
+  .stage-detail {
+    font-size: 0.85rem;
+  }
+  .action {
+    border-color: var(--series-blue);
+  }
+  .action strong {
+    color: var(--series-blue);
+  }
+  .result {
+    border-color: var(--series-blue);
+    background: var(--series-blue-wash);
+  }
+  .result strong {
+    color: var(--series-blue);
+  }
+  .flow-arrow {
+    position: absolute;
+    top: 50%;
+    right: -1.5rem;
+    color: var(--series-blue);
+    font-size: 1.3rem;
+    line-height: 1;
+    transform: translateY(-50%);
+  }
+  .vertical {
+    display: none;
+  }
+  .caption {
+    margin: 1rem 0 0;
+    color: var(--series-secondary);
+    font-size: 0.85rem;
+    line-height: 1.65;
+  }
+  @container (max-width: 560px) {
+    .switch-flow {
+      grid-template-columns: 1fr;
+    }
+    .stage {
+      min-height: 5.5rem;
+    }
+    .flow-arrow {
+      top: auto;
+      right: auto;
+      bottom: -1.65rem;
+      left: 50%;
+      transform: translateX(-50%);
+    }
+    .horizontal {
+      display: none;
+    }
+    .vertical {
+      display: inline;
+    }
+  }
+</style>

@@ -113,9 +113,9 @@ export const codingAgentChapters = [
   },
   {
     number: "15",
-    title: "模型管理——切换模型时，Agent 需要改变什么？",
+    title: "模型管理——多家大模型提供商的配置与切换",
     question:
-      "怎样确定模型服务、凭据和能力配置，并协调启动、切换与会话恢复时的选择？",
+      "从登录多家大模型提供商到选择、切换和使用模型，Ink 怎样组织凭据、候选列表、接入配置与模型能力，并保留用户选择？",
     postId: "coding-agent-15-model-management",
   },
 ] as const;
