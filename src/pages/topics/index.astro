@@ -21,6 +21,7 @@ const topics = [
       "记录从零开发 Ink 的过程，按核心模块解释 Coding Agent 的原理、伪代码实现与工程取舍。",
     outline:
       "阅读路线：最小执行闭环 → 模型与工具 → 上下文与会话 → 交互与权限 → 扩展、协作与验证。",
+    href: "/ink/",
   },
   {
     id: "building-a-blog",
@@ -28,16 +29,20 @@ const topics = [
     tag: "博客搭建",
     description: "从框架与主题选择，到中文适配、内容管理、搜索和部署。",
     outline: undefined,
+    href: undefined,
   },
 ];
 ---
 
 <Layout
-  title={`专题 | ${config.site.title}`}
-  description="把零散的知识，整理成可以循序阅读的目录。"
+  title={`Ink 开发、Coding Agent 原理与博客搭建专题 | ${config.site.title}`}
+  description="按顺序阅读 Coding Agent 原理与实践：结合 Ink 源码理解执行循环、模型接入、工具与子代理，也记录 Astro 个人博客的搭建过程。"
 >
   <Header /><Breadcrumb />
-  <Main pageTitle="专题" pageDesc="把零散的知识，整理成可以循序阅读的目录。">
+  <Main
+    pageTitle="技术专题"
+    pageDesc="从 Ink 开发到个人博客搭建，把实践整理成可以循序阅读的目录。"
+  >
     {
       topics.map(topic => {
         const topicPosts = posts.filter(post =>
@@ -48,6 +53,14 @@ const topics = [
             <h2 id={topic.id}>{topic.title}</h2>
             <p>{topic.description}</p>
             {topic.outline && <p>{topic.outline}</p>}
+            {topic.href && (
+              <a
+                class="text-accent underline underline-offset-4"
+                href={topic.href}
+              >
+                阅读 Ink 项目介绍与系列导读
+              </a>
+            )}
             {topicPosts.length > 0 ? (
               <>
                 <ol class="mt-5 list-decimal space-y-3 pl-5">

@@ -9,7 +9,7 @@ import config from "@/config";
 const posts = getSortedPosts(await getCollection("posts"));
 ---
 
-<Layout>
+<Layout title={`Ink 开发与 Coding Agent 原理 | ${config.site.title}`}>
   <Header />
   <main
     id="main-content"
@@ -21,9 +21,10 @@ const posts = getSortedPosts(await getCollection("posts"));
       <div class="garden-intro">折腾客的学习笔记</div>
       <h1>今天学到的，<br />留给明天的自己。</h1>
       <p>
-        写代码，试想法，弄明白问题。<br
-          class="hidden sm:block"
-        />把学习中的实践与思考，一点点记下来。
+        我正在开发 Ink，一个开源终端 AI 助手。<br class="hidden sm:block" />在<a
+          class="text-accent underline underline-offset-4"
+          href="/ink/">《Coding Agent 原理与实践》</a
+        >中，结合 Ink 源码记录执行循环、工具调用、上下文管理与子代理的实现。
       </p>
     </section>
     <div class="garden-grid">
@@ -46,8 +47,12 @@ const posts = getSortedPosts(await getCollection("posts"));
       </section>
       <aside class="garden-aside">
         <h2 class="section-title">正在整理</h2>
-        <p>个人博客搭建<br />从技术选型到持续写作。</p>
-        <a href="/topics/" class="text-sm hover:underline">阅读专题目录</a>
+        <p>Ink 开发手记<br />从最小 Agent 到完整的编程助手。</p>
+        <a href="/ink/" class="text-sm hover:underline"
+          >阅读 Coding Agent 系列</a
+        >
+        <p class="mt-4">也记录个人博客的搭建与持续写作。</p>
+        <a href="/topics/" class="text-sm hover:underline">浏览全部专题</a>
         <hr class="border-border my-5" />
         <h2 class="section-title">保持联系</h2>
         <p>用 RSS 订阅，在你喜欢的阅读器里接收新文章。</p>

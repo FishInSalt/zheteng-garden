@@ -76,6 +76,12 @@ SITE_URL=https://your-domain.example pnpm build
 
 启用后请实际检查统计后台是否收到访问数据。统计依赖浏览器上报，不等同于完整的服务器访问日志。
 
+## 搜索引擎与项目入口
+
+`/ink/` 是 Ink 项目介绍与《Coding Agent 原理与实践》的固定入口，按 `src/data/coding-agent-series.ts` 的章节顺序动态列出已发布文章。新增文章时保持章节数据同步；草稿与尚未到期的文章不会出现在入口中。首页、专题、关于页和系列文章页均链接此入口，并连接 [Ink 项目文档](https://fishinsalt.github.io/ink/zh/)与 [GitHub 仓库](https://github.com/FishInSalt/ink)。
+
+`astro-paper.config.ts` 中的 `site.googleVerification` 是 Google Search Console 的公开 HTML 所有权验证标记，与当前验证该站点的 Google 账号关联，不是 API 密钥。验证成功后仍需保留，避免后续重新验证时失去该验证方式。发布后在 Search Console 中提交 `https://zheteng-garden.pages.dev/sitemap-index.xml`，并用网址检查查看首页、`/ink/` 和代表文章的抓取与索引状态。
+
 ## Git 和文件
 
 需要提交源码、Markdown、`pnpm-lock.yaml`；`node_modules/`、`dist/`、`.astro/`、生成的搜索索引和本地环境文件已忽略。

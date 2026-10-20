@@ -133,7 +133,15 @@ const ogImage = ogImageUrl
     <main id="main-content" class="post-page" data-pagefind-body>
       <header class="post-heading">
         <BackButton />
-        {seriesTitle && <p class="post-series-name">{seriesTitle[1]}</p>}
+        {
+          seriesTitle && (
+            <p class="post-series-name">
+              <a href="/ink/" class="hover:underline">
+                {seriesTitle[1]}
+              </a>
+            </p>
+          )
+        }
         <h1
           style={{ viewTransitionName: toTransitionName(post.id) }}
           class="font-bold"

@@ -1,0 +1,135 @@
+---
+import { getCollection } from "astro:content";
+import Layout from "@/layouts/Layout.astro";
+import Header from "@/components/Header.astro";
+import Footer from "@/components/Footer.astro";
+import Breadcrumb from "@/components/Breadcrumb.astro";
+import Card from "@/components/Card.astro";
+import { codingAgentChapters } from "@/data/coding-agent-series";
+import { getSortedPosts } from "@/utils/getSortedPosts";
+import { getPostUrl } from "@/utils/getPostPaths";
+import config from "@/config";
+
+const published = getSortedPosts(await getCollection("posts"));
+const chapters = codingAgentChapters.flatMap(chapter => {
+  const post = published.find(entry => entry.id === chapter.postId);
+  return post ? [{ ...chapter, post }] : [];
+});
+const description =
+  "Ink 是一个开源终端 AI 助手。Coding Agent 原理与实践系列聚焦代码场景，结合自研 Agent Harness 的源码，介绍执行循环、模型接入、工具、上下文、会话与子代理。";
+const pageURL = new URL("ink/", Astro.site).href;
+const structuredData = {
+  "@context": "https://schema.org",
+  "@type": "CollectionPage",
+  "@id": `${pageURL}#webpage`,
+  url: pageURL,
+  name: "Ink 开发手记：Coding Agent 原理与实践",
+  description,
+  inLanguage: "zh-CN",
+  isPartOf: {
+    "@type": "WebSite",
+    name: config.site.title,
+    url: Astro.site?.href,
+  },
+  about: {
+    "@type": "SoftwareSourceCode",
+    "@id": "https://github.com/FishInSalt/ink#source",
+    name: "Ink",
+    description: "开源终端 AI 助手与自研 Agent Harness",
+    url: "https://fishinsalt.github.io/ink/zh/",
+    codeRepository: "https://github.com/FishInSalt/ink",
+    programmingLanguage: "TypeScript",
+  },
+  mainEntity: {
+    "@type": "ItemList",
+    numberOfItems: chapters.length,
+    itemListElement: chapters.map(({ post }, index) => ({
+      "@type": "ListItem",
+      position: index + 1,
+      name: post.data.title,
+      url: new URL(getPostUrl(post.id, post.filePath), Astro.site).href,
+    })),
+  },
+};
+---
+
+<Layout
+  title={`Ink 开发手记：Coding Agent 原理与实践 | ${config.site.title}`}
+  description={description}
+>
+  <script
+    slot="head"
+    type="application/ld+json"
+    is:inline
+    set:html={JSON.stringify(structuredData).replaceAll("<", "\\u003c")}
+  />
+  <Header />
+  <Breadcrumb />
+  <main id="main-content" class="app-layout">
+    <section class="garden-hero" aria-labelledby="ink-title">
+      <h1 id="ink-title" class="text-balance">
+        Ink 开发手记：<br /><span class="inline-block">Coding Agent</span>
+        <span class="inline-block">原理与实践</span>
+      </h1>
+      <p>
+        Ink 是一个开源终端 AI 助手。我参考 pi，从零实现自己的 Agent Harness：
+        连接模型调用、工具执行、上下文与会话，让模型能在项目中完成编程任务。
+      </p>
+      <p>
+        这个系列聚焦代码场景，结合 Ink
+        源码、带注释的代码与图解，解释各个模块为什么需要、怎样工作，以及实现时的工程取舍。
+      </p>
+      <nav
+        aria-label="Ink 项目资源"
+        class="mt-5 flex flex-wrap gap-x-6 gap-y-2"
+      >
+        <a
+          href="https://fishinsalt.github.io/ink/zh/"
+          class="text-accent underline underline-offset-4">使用 Ink：项目文档</a
+        >
+        <a
+          href="https://github.com/FishInSalt/ink"
+          class="text-accent underline underline-offset-4">查看 GitHub 源码</a
+        >
+        <a href="#chapters" class="text-accent underline underline-offset-4"
+          >阅读系列文章</a
+        >
+      </nav>
+    </section>
+    <div class="garden-grid">
+      <section id="chapters" aria-labelledby="chapters-title">
+        <h2 id="chapters-title" class="section-title">
+          系列文章 <small>已发布 {chapters.length} 篇，按章节顺序阅读</small>
+        </h2>
+        <ol>
+          {chapters.map(({ post }) => <Card {...post} variant="h3" />)}
+        </ol>
+      </section>
+      <aside class="garden-aside" aria-labelledby="reading-title">
+        <h2 id="reading-title" class="section-title">怎样开始阅读</h2>
+        <p>适合用过编程助手，希望进一步理解运行机制的读者。</p>
+        <ol class="list-decimal space-y-4 pl-5 text-sm">
+          <li>
+            <strong>先跑通一轮任务</strong><br />
+            从 00–03 章理解项目背景、执行循环、模型接入与工具反馈。
+          </li>
+          <li>
+            <strong>让任务持续运行</strong><br />
+            在 04–08 章了解上下文、会话恢复、交互、终端显示与权限边界。
+          </li>
+          <li>
+            <strong>扩展能力与协作</strong><br />
+            从 09 章起阅读扩展、子代理、Skills、MCP、图片输入与模型管理。
+          </li>
+        </ol>
+        <hr class="border-border my-5" />
+        <p>想先安装、配置或试用 Ink，可以从项目文档开始。</p>
+        <a
+          href="https://fishinsalt.github.io/ink/zh/"
+          class="text-sm hover:underline">打开 Ink 中文文档</a
+        >
+      </aside>
+    </div>
+  </main>
+  <Footer />
+</Layout>
