@@ -120,11 +120,13 @@ const ogImage = ogImageUrl
 
 <PostLayout
   title={`${title} | ${config.site.title}`}
+  articleTitle={title}
   description={description}
   ogImage={ogImage}
   canonicalURL={canonicalURL}
   pubDatetime={pubDatetime}
   modDatetime={modDatetime}
+  isInkSeries={Boolean(seriesTitle)}
 >
   <div class="docs-topbar"><Header /></div>
   <div class="docs-shell app-layout">

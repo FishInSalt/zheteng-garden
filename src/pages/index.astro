@@ -9,7 +9,7 @@ import config from "@/config";
 const posts = getSortedPosts(await getCollection("posts"));
 ---
 
-<Layout title={`Ink 开发与 Coding Agent 原理 | ${config.site.title}`}>
+<Layout title={`Ink 开发手记与 Coding Agent 原理与实践 | ${config.site.title}`}>
   <Header />
   <main
     id="main-content"
@@ -19,7 +19,11 @@ const posts = getSortedPosts(await getCollection("posts"));
   >
     <section class="garden-hero">
       <div class="garden-intro">折腾客的学习笔记</div>
-      <h1>今天学到的，<br />留给明天的自己。</h1>
+      <h1>
+        Ink 开发手记：<br /><span class="inline-block">Coding Agent</span>{" "}
+        <span class="inline-block">原理与实践</span>
+      </h1>
+      <p>今天学到的，留给明天的自己。</p>
       <p>
         我正在开发 Ink，一个开源终端 AI 助手。<br class="hidden sm:block" />在<a
           class="text-accent underline underline-offset-4"

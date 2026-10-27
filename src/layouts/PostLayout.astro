@@ -4,23 +4,48 @@ import config from "@/config";
 
 type Props = {
   title?: string;
+  articleTitle?: string;
   description?: string;
   ogImage?: string;
   canonicalURL?: string;
   pubDatetime?: Date;
   modDatetime?: Date | null;
+  isInkSeries?: boolean;
 };
 
 const { site } = config;
 
-const { title, description, ogImage, canonicalURL, pubDatetime, modDatetime } =
-  Astro.props;
+const {
+  title,
+  articleTitle,
+  description,
+  ogImage,
+  canonicalURL = new URL(Astro.url.pathname, Astro.site).href,
+  pubDatetime,
+  modDatetime,
+  isInkSeries = false,
+} = Astro.props;
 
 const structuredData = {
   "@context": "https://schema.org",
   "@type": "BlogPosting",
-  headline: title ?? site.title,
+  headline: articleTitle ?? title ?? site.title,
+  url: canonicalURL,
+  mainEntityOfPage: { "@type": "WebPage", "@id": canonicalURL },
+  description,
+  inLanguage: Astro.currentLocale ?? site.lang,
   image: ogImage,
+  ...(isInkSeries && {
+    isPartOf: {
+      "@type": "CollectionPage",
+      "@id": new URL("ink/#webpage", Astro.site).href,
+      name: "Coding Agent 原理与实践：Ink 开发手记",
+    },
+    about: {
+      "@type": "SoftwareSourceCode",
+      "@id": "https://github.com/FishInSalt/ink#source",
+    },
+  }),
   ...(pubDatetime && { datePublished: pubDatetime.toISOString() }),
   ...(modDatetime && { dateModified: modDatetime.toISOString() }),
   author: [
